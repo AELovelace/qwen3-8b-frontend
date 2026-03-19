@@ -9,10 +9,11 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -22,8 +23,11 @@ load_dotenv(Path(__file__).parent / ".env")
 
 import aiohttp
 import aiosqlite
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import HTMLResponse, StreamingResponse
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -41,6 +45,8 @@ FTS_RESULT_LIMIT       = 3       # past-memory snippets to inject when truncated
 TOKEN_ESTIMATE_DIVISOR = 4       # chars / 4 ≈ tokens
 MAX_SEARCH_ITERATIONS  = 3       # max Brave searches per response
 BRAVE_SEARCH_COUNT     = 5       # results to fetch per query
+JWT_ALGORITHM          = "HS256"
+ACCESS_TOKEN_HOURS     = 24
 
 SEARCH_TAG_RE = re.compile(r'<search>(.*?)</search>', re.IGNORECASE | re.DOTALL)
 
@@ -58,6 +64,8 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="Ollama Qwen3 Chat")
 _ollama_start_lock = asyncio.Lock()
+_auth_scheme = HTTPBearer(auto_error=False)
+_pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # ---------------------------------------------------------------------------
 # Database
@@ -66,8 +74,32 @@ _ollama_start_lock = asyncio.Lock()
 _DDL_STATEMENTS = [
     "PRAGMA journal_mode=WAL",
     """
+    CREATE TABLE IF NOT EXISTS users (
+        id            TEXT PRIMARY KEY,
+        username      TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role          TEXT NOT NULL DEFAULT 'user',
+        is_active     INTEGER NOT NULL DEFAULT 1,
+        created_at    TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
+    """
+    CREATE TABLE IF NOT EXISTS invite_tokens (
+        id         TEXT PRIMARY KEY,
+        token      TEXT NOT NULL UNIQUE,
+        created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        expires_at TEXT,
+        used_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
+        used_at    TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_invites_token ON invite_tokens(token)",
+    """
     CREATE TABLE IF NOT EXISTS conversations (
         id         TEXT PRIMARY KEY,
+        user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         title      TEXT NOT NULL DEFAULT 'New Chat',
         created_at TEXT NOT NULL
     )
@@ -115,6 +147,196 @@ async def get_db() -> aiosqlite.Connection:
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys = ON")
     return db
+
+
+def get_jwt_secret() -> str:
+    return os.environ.get("JWT_SECRET", "").strip()
+
+
+def hash_password(password: str) -> str:
+    return _pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return _pwd_context.verify(password, password_hash)
+
+
+def create_access_token(user_id: str) -> str:
+    secret = get_jwt_secret()
+    if not secret:
+        raise HTTPException(status_code=500, detail="JWT secret is not configured")
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(hours=ACCESS_TOKEN_HOURS)).timestamp()),
+    }
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        return None
+
+
+def validate_username(username: str) -> str:
+    normalized = (username or "").strip().lower()
+    if len(normalized) < 3 or len(normalized) > 32:
+        raise HTTPException(status_code=400, detail="Username must be 3-32 characters")
+    if not re.fullmatch(r"[a-z0-9_.-]+", normalized):
+        raise HTTPException(
+            status_code=400,
+            detail="Username can only contain letters, numbers, dot, underscore, and dash",
+        )
+    return normalized
+
+
+def validate_password_strength(password: str) -> str:
+    candidate = (password or "").strip()
+    if len(candidate) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    return candidate
+
+
+async def ensure_conversations_user_column(db: aiosqlite.Connection) -> None:
+    cursor = await db.execute("PRAGMA table_info(conversations)")
+    rows = await cursor.fetchall()
+    cols = {row["name"] for row in rows}
+    if "user_id" not in cols:
+        await db.execute("ALTER TABLE conversations ADD COLUMN user_id TEXT")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, created_at)")
+    await db.commit()
+
+
+async def ensure_bootstrap_admin(db: aiosqlite.Connection) -> dict:
+    raw_username = os.environ.get("ADMIN_USERNAME", "").strip().lower()
+    raw_password = os.environ.get("ADMIN_PASSWORD", "")
+
+    cursor = await db.execute("SELECT COUNT(*) AS cnt FROM users")
+    row = await cursor.fetchone()
+    if row and row["cnt"] > 0:
+        # Recovery path: if env admin creds are set and user exists, keep it admin/active and sync password.
+        if raw_username and raw_password:
+            admin_username = validate_username(raw_username)
+            admin_password = validate_password_strength(raw_password)
+            cursor = await db.execute(
+                "SELECT id, username, password_hash, role, is_active FROM users WHERE username=?",
+                (admin_username,),
+            )
+            env_user = await cursor.fetchone()
+            if env_user:
+                updated = False
+                if env_user["role"] != "admin":
+                    await db.execute("UPDATE users SET role='admin' WHERE id=?", (env_user["id"],))
+                    updated = True
+                if not env_user["is_active"]:
+                    await db.execute("UPDATE users SET is_active=1 WHERE id=?", (env_user["id"],))
+                    updated = True
+                if not verify_password(admin_password, env_user["password_hash"]):
+                    await db.execute(
+                        "UPDATE users SET password_hash=? WHERE id=?",
+                        (hash_password(admin_password), env_user["id"]),
+                    )
+                    updated = True
+                if updated:
+                    await db.commit()
+                    log.warning("Synchronized admin credentials for '%s' from environment.", admin_username)
+                return {"id": env_user["id"], "username": env_user["username"], "role": "admin"}
+
+        cursor = await db.execute("SELECT id, username, role FROM users WHERE role='admin' ORDER BY created_at ASC LIMIT 1")
+        admin = await cursor.fetchone()
+        if admin:
+            return dict(admin)
+
+        # If no admin exists but env credentials are provided, create one.
+        if raw_username and raw_password:
+            admin_username = validate_username(raw_username)
+            admin_password = validate_password_strength(raw_password)
+            admin_id = str(uuid.uuid4())
+            await db.execute(
+                """
+                INSERT INTO users(id, username, password_hash, role, is_active, created_at)
+                VALUES(?, ?, ?, 'admin', 1, ?)
+                """,
+                (admin_id, admin_username, hash_password(admin_password), now_iso()),
+            )
+            await db.commit()
+            log.warning("Created missing admin user '%s' from environment.", admin_username)
+            return {"id": admin_id, "username": admin_username, "role": "admin"}
+
+        raise RuntimeError("No admin user found. Set ADMIN_USERNAME and ADMIN_PASSWORD to recover access.")
+
+    if not raw_username:
+        raise RuntimeError("ADMIN_USERNAME is required before first startup")
+    if not raw_password:
+        raise RuntimeError("ADMIN_PASSWORD is required before first startup")
+
+    admin_username = validate_username(raw_username)
+    admin_password = validate_password_strength(raw_password)
+    admin_id = str(uuid.uuid4())
+    await db.execute(
+        """
+        INSERT INTO users(id, username, password_hash, role, is_active, created_at)
+        VALUES(?, ?, ?, 'admin', 1, ?)
+        """,
+        (admin_id, admin_username, hash_password(admin_password), now_iso()),
+    )
+    await db.commit()
+    log.warning("Bootstrap admin created from environment for username '%s'", admin_username)
+    return {"id": admin_id, "username": admin_username, "role": "admin"}
+
+
+async def backfill_legacy_conversations(db: aiosqlite.Connection, fallback_user_id: str) -> None:
+    await db.execute(
+        "UPDATE conversations SET user_id = ? WHERE user_id IS NULL OR TRIM(user_id) = ''",
+        (fallback_user_id,),
+    )
+    await db.commit()
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_auth_scheme),
+) -> dict:
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authentication token")
+
+    token = credentials.credentials
+    secret = get_jwt_secret()
+    if not secret:
+        raise HTTPException(status_code=500, detail="JWT secret is not configured")
+
+    try:
+        payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
+    except JWTError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication token") from exc
+
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authentication token")
+
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, username, role, is_active, created_at FROM users WHERE id=?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        if not row or not row["is_active"]:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is not active")
+        return dict(row)
+    finally:
+        await db.close()
+
+
+async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    return current_user
 
 
 async def is_ollama_running(timeout_seconds: float = 1.5) -> bool:
@@ -189,6 +411,13 @@ async def startup():
         for stmt in _DDL_STATEMENTS:
             await db.execute(stmt.strip())
         await db.commit()
+        await ensure_conversations_user_column(db)
+
+        if not get_jwt_secret():
+            raise RuntimeError("JWT_SECRET is required in environment before startup")
+
+        admin = await ensure_bootstrap_admin(db)
+        await backfill_legacy_conversations(db, admin["id"])
     finally:
         await db.close()
     log.info("Database initialised at %s", DB_PATH)
@@ -216,6 +445,27 @@ class ChatRequest(BaseModel):
 
 class SettingsUpdate(BaseModel):
     brave_api_key: str = ""
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class SignupRequest(BaseModel):
+    username: str
+    password: str
+    invite_token: str
+
+
+class AdminCreateUserRequest(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+
+
+class AdminCreateInviteRequest(BaseModel):
+    expires_in_days: int = 7
 
 
 # ---------------------------------------------------------------------------
@@ -358,7 +608,13 @@ async def build_active_context(db: aiosqlite.Connection, conversation_id: str, n
     return included, truncated
 
 
-async def fts_search(db: aiosqlite.Connection, conversation_id: str, query: str, limit: int = FTS_RESULT_LIMIT) -> list[str]:
+async def fts_search(
+    db: aiosqlite.Connection,
+    conversation_id: str,
+    query: str,
+    current_user_id: str,
+    limit: int = FTS_RESULT_LIMIT,
+) -> list[str]:
     """Search messages_fts for snippets relevant to query, excluding current conversation."""
     # Sanitise FTS query: remove special chars, keep words
     safe_query = " ".join(
@@ -371,12 +627,14 @@ async def fts_search(db: aiosqlite.Connection, conversation_id: str, query: str,
             """
             SELECT f.content
             FROM messages_fts f
+                        JOIN conversations c ON c.id = f.conversation_id
             WHERE messages_fts MATCH ?
               AND f.conversation_id != ?
+                            AND c.user_id = ?
             ORDER BY rank
             LIMIT ?
             """,
-            (safe_query, conversation_id, limit),
+                        (safe_query, conversation_id, current_user_id, limit),
         )
         rows = await cursor.fetchall()
         return [row["content"] for row in rows]
@@ -424,6 +682,210 @@ async def save_messages(
 
 
 # ---------------------------------------------------------------------------
+# Routes — auth
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/login")
+async def login(body: LoginRequest):
+    username = validate_username(body.username)
+    password = validate_password_strength(body.password)
+
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, username, password_hash, role, is_active, created_at FROM users WHERE username=?",
+            (username,),
+        )
+        user = await cursor.fetchone()
+        if not user or not verify_password(password, user["password_hash"]):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+        if not user["is_active"]:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is inactive")
+
+        token = create_access_token(user["id"])
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user["id"],
+                "username": user["username"],
+                "role": user["role"],
+                "created_at": user["created_at"],
+            },
+        }
+    finally:
+        await db.close()
+
+
+@app.post("/api/auth/signup")
+async def signup(body: SignupRequest):
+    username = validate_username(body.username)
+    password = validate_password_strength(body.password)
+    invite_token = (body.invite_token or "").strip()
+    if len(invite_token) < 8:
+        raise HTTPException(status_code=400, detail="Invite token is required")
+
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            """
+            SELECT id, token, expires_at, used_by
+            FROM invite_tokens
+            WHERE token=?
+            """,
+            (invite_token,),
+        )
+        invite = await cursor.fetchone()
+        if not invite:
+            raise HTTPException(status_code=400, detail="Invalid invite token")
+        if invite["used_by"]:
+            raise HTTPException(status_code=400, detail="Invite token has already been used")
+
+        expiry = parse_iso(invite["expires_at"])
+        if expiry and expiry < datetime.now(timezone.utc):
+            raise HTTPException(status_code=400, detail="Invite token has expired")
+
+        cursor = await db.execute("SELECT id FROM users WHERE username=?", (username,))
+        if await cursor.fetchone():
+            raise HTTPException(status_code=409, detail="Username is already taken")
+
+        user_id = str(uuid.uuid4())
+        now = now_iso()
+        await db.execute(
+            """
+            INSERT INTO users(id, username, password_hash, role, is_active, created_at)
+            VALUES(?, ?, ?, 'user', 1, ?)
+            """,
+            (user_id, username, hash_password(password), now),
+        )
+        await db.execute(
+            "UPDATE invite_tokens SET used_by=?, used_at=? WHERE id=?",
+            (user_id, now, invite["id"]),
+        )
+        await db.commit()
+
+        token = create_access_token(user_id)
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "user": {
+                "id": user_id,
+                "username": username,
+                "role": "user",
+                "created_at": now,
+            },
+        }
+    finally:
+        await db.close()
+
+
+@app.get("/api/auth/me")
+async def auth_me(current_user: dict = Depends(get_current_user)):
+    return {
+        "id": current_user["id"],
+        "username": current_user["username"],
+        "role": current_user["role"],
+        "created_at": current_user["created_at"],
+    }
+
+
+@app.get("/api/admin/users")
+async def admin_list_users(_: dict = Depends(require_admin)):
+    db = await get_db()
+    try:
+        cursor = await db.execute(
+            "SELECT id, username, role, is_active, created_at FROM users ORDER BY created_at ASC"
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        await db.close()
+
+
+@app.post("/api/admin/users", status_code=201)
+async def admin_create_user(body: AdminCreateUserRequest, _: dict = Depends(require_admin)):
+    username = validate_username(body.username)
+    password = validate_password_strength(body.password)
+    role = (body.role or "user").strip().lower()
+    if role not in {"user", "admin"}:
+        raise HTTPException(status_code=400, detail="Role must be 'user' or 'admin'")
+
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM users WHERE username=?", (username,))
+        if await cursor.fetchone():
+            raise HTTPException(status_code=409, detail="Username is already taken")
+
+        user_id = str(uuid.uuid4())
+        ts = now_iso()
+        await db.execute(
+            """
+            INSERT INTO users(id, username, password_hash, role, is_active, created_at)
+            VALUES(?, ?, ?, ?, 1, ?)
+            """,
+            (user_id, username, hash_password(password), role, ts),
+        )
+        await db.commit()
+        return {
+            "id": user_id,
+            "username": username,
+            "role": role,
+            "is_active": 1,
+            "created_at": ts,
+        }
+    finally:
+        await db.close()
+
+
+@app.post("/api/admin/invites", status_code=201)
+async def admin_create_invite(body: AdminCreateInviteRequest, current_user: dict = Depends(require_admin)):
+    days = max(1, min(body.expires_in_days, 30))
+    token = secrets.token_urlsafe(16)
+    expires = datetime.now(timezone.utc) + timedelta(days=days)
+    invite_id = str(uuid.uuid4())
+
+    db = await get_db()
+    try:
+        await db.execute(
+            """
+            INSERT INTO invite_tokens(id, token, created_by, expires_at, created_at)
+            VALUES(?, ?, ?, ?, ?)
+            """,
+            (invite_id, token, current_user["id"], expires.isoformat(), now_iso()),
+        )
+        await db.commit()
+        return {"token": token, "expires_at": expires.isoformat()}
+    finally:
+        await db.close()
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def admin_delete_user(user_id: str, current_user: dict = Depends(require_admin)):
+    if user_id == current_user["id"]:
+        raise HTTPException(status_code=400, detail="Admins cannot delete their own account")
+
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id, role FROM users WHERE id=?", (user_id,))
+        target = await cursor.fetchone()
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if target["role"] == "admin":
+            cursor = await db.execute("SELECT COUNT(*) AS cnt FROM users WHERE role='admin' AND is_active=1")
+            row = await cursor.fetchone()
+            if row and row["cnt"] <= 1:
+                raise HTTPException(status_code=400, detail="Cannot delete the last active admin")
+
+        await db.execute("DELETE FROM conversations WHERE user_id=?", (user_id,))
+        await db.execute("DELETE FROM users WHERE id=?", (user_id,))
+        await db.commit()
+        return {"ok": True}
+    finally:
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
 # Routes — conversations
 # ---------------------------------------------------------------------------
 
@@ -433,11 +895,12 @@ async def index():
 
 
 @app.get("/api/conversations")
-async def list_conversations():
+async def list_conversations(current_user: dict = Depends(get_current_user)):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, title, created_at FROM conversations ORDER BY created_at DESC"
+            "SELECT id, title, created_at FROM conversations WHERE user_id=? ORDER BY created_at DESC",
+            (current_user["id"],),
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -446,13 +909,13 @@ async def list_conversations():
 
 
 @app.post("/api/conversations", status_code=201)
-async def create_conversation(body: ConversationCreate):
+async def create_conversation(body: ConversationCreate, current_user: dict = Depends(get_current_user)):
     conv_id = str(uuid.uuid4())
     db = await get_db()
     try:
         await db.execute(
-            "INSERT INTO conversations(id,title,created_at) VALUES(?,?,?)",
-            (conv_id, body.title, now_iso()),
+            "INSERT INTO conversations(id,user_id,title,created_at) VALUES(?,?,?,?)",
+            (conv_id, current_user["id"], body.title, now_iso()),
         )
         await db.commit()
         return {"id": conv_id, "title": body.title}
@@ -461,10 +924,15 @@ async def create_conversation(body: ConversationCreate):
 
 
 @app.patch("/api/conversations/{conv_id}")
-async def rename_conversation(conv_id: str, body: ConversationRename):
+async def rename_conversation(conv_id: str, body: ConversationRename, current_user: dict = Depends(get_current_user)):
     db = await get_db()
     try:
-        await db.execute("UPDATE conversations SET title=? WHERE id=?", (body.title, conv_id))
+        cursor = await db.execute(
+            "UPDATE conversations SET title=? WHERE id=? AND user_id=?",
+            (body.title, conv_id, current_user["id"]),
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Conversation not found")
         await db.commit()
         return {"ok": True}
     finally:
@@ -472,10 +940,12 @@ async def rename_conversation(conv_id: str, body: ConversationRename):
 
 
 @app.delete("/api/conversations/{conv_id}")
-async def delete_conversation(conv_id: str):
+async def delete_conversation(conv_id: str, current_user: dict = Depends(get_current_user)):
     db = await get_db()
     try:
-        await db.execute("DELETE FROM conversations WHERE id=?", (conv_id,))
+        cursor = await db.execute("DELETE FROM conversations WHERE id=? AND user_id=?", (conv_id, current_user["id"]))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Conversation not found")
         await db.commit()
         return {"ok": True}
     finally:
@@ -483,9 +953,13 @@ async def delete_conversation(conv_id: str):
 
 
 @app.get("/api/conversations/{conv_id}/messages")
-async def get_messages(conv_id: str):
+async def get_messages(conv_id: str, current_user: dict = Depends(get_current_user)):
     db = await get_db()
     try:
+        cursor = await db.execute("SELECT id FROM conversations WHERE id=? AND user_id=?", (conv_id, current_user["id"]))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
         cursor = await db.execute(
             "SELECT role, content, thinking, created_at FROM messages WHERE conversation_id=? ORDER BY id ASC",
             (conv_id,),
@@ -501,14 +975,14 @@ async def get_messages(conv_id: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/settings")
-async def get_settings():
+async def get_settings(_: dict = Depends(get_current_user)):
     key = get_brave_api_key()
     masked = (key[:4] + "..." + key[-4:]) if len(key) > 8 else ("*" * len(key) if key else "")
     return {"brave_api_key_set": bool(key), "brave_api_key_masked": masked}
 
 
 @app.post("/api/settings")
-async def update_settings(body: SettingsUpdate):
+async def update_settings(body: SettingsUpdate, _: dict = Depends(get_current_user)):
     cfg = load_config()
     cfg["brave_api_key"] = body.brave_api_key.strip()
     save_config(cfg)
@@ -520,7 +994,7 @@ async def update_settings(body: SettingsUpdate):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
     if not await ensure_ollama_running(wait_seconds=6):
         raise HTTPException(
             status_code=503,
@@ -529,7 +1003,10 @@ async def chat(req: ChatRequest):
 
     db = await get_db()
     try:
-        cursor = await db.execute("SELECT id FROM conversations WHERE id=?", (req.conversation_id,))
+        cursor = await db.execute(
+            "SELECT id FROM conversations WHERE id=? AND user_id=?",
+            (req.conversation_id, current_user["id"]),
+        )
         if not await cursor.fetchone():
             raise HTTPException(status_code=404, detail="Conversation not found")
 
@@ -537,7 +1014,7 @@ async def chat(req: ChatRequest):
 
         fts_snippets: list[str] = []
         if was_truncated:
-            fts_snippets = await fts_search(db, req.conversation_id, req.message)
+            fts_snippets = await fts_search(db, req.conversation_id, req.message, current_user["id"])
             if fts_snippets:
                 log.info("Injecting %d FTS snippet(s) for conv %s", len(fts_snippets), req.conversation_id)
 

@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>point_in_triangle</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Page that gives an overview of the funtion point_in_triangle" />
+  <meta name="rh-index-keywords" content="point_in_triangle" />
+  <meta name="search-keywords" content="point_in_triangle" />
+  <meta name="is_pure" content="true" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">point_in_triangle</span></h1>
+  <p>This function checks if the given point falls within the given triangular area. If the point falls within the defined triangle the function will return <span class="inline2">true</span>, otherwise the function will return <span class="inline2">false</span>.</p>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">point_in_triangle</span>(px, py, x1, y1, x2, y2, x3, y3)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>px</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The x coordinate of the point to check</td>
+      </tr>
+      <tr>
+        <td>py</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The y coordinate of the point to check</td>
+      </tr>
+      <tr>
+        <td>x1</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The x coordinate of the first corner of the triangle to check</td>
+      </tr>
+      <tr>
+        <td>y1</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The y coordinate of the first corner of the triangle to check</td>
+      </tr>
+      <tr>
+        <td>x2</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The x coordinate of the second corner of the triangle to check</td>
+      </tr>
+      <tr>
+        <td>y2</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The y coordinate of the second corner of the triangle to check</td>
+      </tr>
+      <tr>
+        <td>x3</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The x coordinate of the third corner of the triangle to check</td>
+      </tr>
+      <tr>
+        <td>y3</td>
+        <td><span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The y coordinate of the third corner of the triangle to check</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Bool"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Boolean</a></span></p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">var _inst = instance_nearest(x, y, obj_player);<br />
+    var _can_see = false;<br />
+    if (instance_exists(_inst))<br />
+    {<br />
+        var _x1 = x + lengthdir_x(100, image_angle - 45);<br />
+        var _y1 = y + lengthdir_y(100, image_angle - 45);<br />
+        var _x2 = x + lengthdir_x(100, image_angle + 45);<br />
+        var _y2 = y + lengthdir_y(100, image_angle + 45);<br />
+        _can_see = point_in_triangle(_inst.x, _inst.y, x, y, _x1, _y1, _x2, _y2);<br />
+    }</p>
+  <p>The above code uses the <span class="inline3_func"><span data-field="title" data-format="default">point_in_triangle</span></span> function as a &quot;cone of vision&quot; to check for an instance of <span class="inline2">obj_player</span> and assigns the return value to a variable <span class="inline2">_can_see</span>.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a data-xref="{title}" href="Collisions.htm">Collisions</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="point_in_circle.htm">point_in_circle</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+point_in_triangle
+-->
+  <!-- TAGS
+point_in_triangle
+-->
+</body>
+</html>

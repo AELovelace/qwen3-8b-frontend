@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>sprite_replace</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Page explaining the function sprite_replace" />
+  <meta name="rh-index-keywords" content="sprite_replace" />
+  <meta name="search-keywords" content="sprite_replace" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">sprite_replace</span></h1>
+  <p>This function works in almost the exact same manner as <span class="inline3_func"><a data-xref="{title}" href="sprite_add.htm">sprite_add</a></span>, only instead of returning the handle of the sprite you are importing, it overwrites a previously created sprite index.</p>
+  <p>When using this function you should use a sprite index that has been created and stored in a variable using other functions like <span class="inline3_func"><a data-xref="{title}" href="sprite_add.htm">sprite_add</a></span> or <span class="inline3_func"><a data-xref="{title}" href="sprite_create_from_surface.htm">sprite_create_from_surface</a></span>, or even <span class="inline3_func"><a data-xref="{title}" href="sprite_duplicate.htm">sprite_duplicate</a></span>, rather than a resource tree sprite asset.</p>
+  <p>You <i>can</i> replace a sprite from the game assets using this function, but doing so means that you will lose the reference ID for the sprite that you are replacing, regardless of whether you call <span class="inline3_func"><a data-xref="{title}" href="../../../General_Game_Control/game_restart.htm">game_restart</a></span> or not, and so this is not recommended.</p>
+  <p>Regardless of the sprite being replaced, this function will <b>create a new texture page for the sprite</b> and so care should be taken when using it as it may adversely affect performance by increasing the number of required texture swaps for rendering.</p>
+  <p>For information on the arguments, see <span class="inline3_func"><a data-xref="{title}" href="sprite_add.htm">sprite_add</a></span>.</p>
+  <h3>Platform-specific notes</h3>
+  <ul class="colour">
+    <li>You should be aware that if you are using this function in your <strong>HTML5</strong> target game to load resources from an external server, then, due to XSS protection in browsers, attempts to load resources from across domains can be blocked and may appear to return blank results.</li>
+  </ul>
+  <div data-conref="../../../../../assets/snippets/Note_File_Handling_Limitations.hts"> </div>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">sprite_replace</span>(ind, fname, imgnumb, removeback, smooth, xorig, yorig)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>ind</td>
+        <td><span data-keyref="Type_Asset_Sprite"><a href="../../../../../The_Asset_Editors/Sprites.htm" target="_blank">Sprite Asset</a></span></td>
+        <td>The sprite to permanently replace</td>
+      </tr>
+      <tr>
+        <td>fname</td>
+        <td><span data-keyref="Type_String"><a href="../../../../GML_Overview/Data_Types.htm" target="_blank">String</a></span></td>
+        <td>The name (a file path) of the file to add or a data URL with the image data embedded in the string (encoded in <a href="https://en.wikipedia.org/wiki/Base64">base64</a>)</td>
+      </tr>
+      <tr>
+        <td>imgnumb</td>
+        <td><span data-keyref="Type_Real"><a href="../../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The number of frames the sprite will be cut up into horizontally. Use 1 for one single image or <span class="inline">*.gif</span></td>
+      </tr>
+      <tr>
+        <td>removeback</td>
+        <td><span data-keyref="Type_Bool"><a href="../../../../GML_Overview/Data_Types.htm" target="_blank">Boolean</a></span></td>
+        <td>Indicates whether to make all pixels with the background colour (left-bottom pixel) transparent</td>
+      </tr>
+      <tr>
+        <td>smooth</td>
+        <td><span data-keyref="Type_Bool"><a href="../../../../GML_Overview/Data_Types.htm" target="_blank">Boolean</a></span></td>
+        <td>Indicates whether to smooth the edges</td>
+      </tr>
+      <tr>
+        <td>xorig</td>
+        <td><span data-keyref="Type_Real"><a href="../../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The x coordinate of the origin, relative to the sprite&#39;s top left corner</td>
+      </tr>
+      <tr>
+        <td>yorig</td>
+        <td><span data-keyref="Type_Real"><a href="../../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The y coordinate of the origin, relative to the sprite&#39;s top left corner</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns</h4>
+  <p class="code"><span data-keyref="Type_Void">N/A</span></p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code"><span data-field="title" data-format="default">sprite_replace</span>(spr_banner, &quot;gravemaker.png&quot;, 1, false, false, 0, 0);</p>
+  <p>The above code will replace the image asset referenced in <span class="inline2">spr_banner</span> with another one loaded from an external source.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a data-xref="{title}" href="Sprite_Manipulation.htm">Sprite Manipulation</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="sprite_duplicate.htm">sprite_duplicate</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+sprite_replace
+-->
+  <!-- TAGS
+sprite_replace
+-->
+</body>
+</html>

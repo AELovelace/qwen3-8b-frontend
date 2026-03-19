@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>Instances</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Page outlining the different functions and variables associated with Instances" />
+  <meta name="rh-index-keywords" content="" />
+  <meta name="search-keywords" content="Instances" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">Instances</span></h1>
+  <p><b>Instances</b> are created from <a href="../../../../The_Asset_Editors/Objects.htm">Objects</a> and, once created, they can be changed, manipulated and destroyed through <span data-keyref="GML_Code">GML Code</span> and <span data-keyref="GML_Visual">GML Visual</span> actions. This page lists the main functions related to instances that are available in <span data-keyref="GameMaker Name">GameMaker</span>.</p>
+  <h3>Creating Instances</h3>
+  <p>You can create an instance of an object in a few ways:</p>
+  <ul class="colour">
+    <li>Drag it on an Instance Layer in <a data-xref="{title}" href="../../../../The_Asset_Editors/Rooms.htm">The Room Editor</a>.</li>
+    <li>Create it at runtime, using the functions <span class="inline3_func"><a data-xref="{title}" href="instance_create_depth.htm">instance_create_depth</a></span> and <span class="inline3_func"><a data-xref="{title}" href="instance_create_layer.htm">instance_create_layer</a></span>.</li>
+    <li>Add it to a sequence in <a data-xref="{title}" href="../../../../The_Asset_Editors/Sequences.htm">The Sequence Editor</a> and add the sequence in <a data-xref="{title}" href="../../../../The_Asset_Editors/Rooms.htm">The Room Editor</a> or through code.</li>
+    <li>Add it to a room that&#39;s not the current <a data-xref="{title}" href="../Rooms/room.htm">room</a> using <span class="inline3_func"><a data-xref="{title}" href="../Rooms/room_instance_add.htm">room_instance_add</a></span>.</li>
+  </ul>
+  <h3>Deactivating Instances</h3>
+  <p>You also have the possibility of <strong>deactivating</strong> instances, which means they won&#39;t process any of their events, although they will still exist within the game. You can read about how this works and the functions you can use on the <a href="Deactivating_Instances/Deactivating_Instances.htm">Deactivating Instances</a> page.</p>
+  <h3>Objects vs. Instances</h3>
+  <p>For the general difference between using object and instance handles in functions, see <a data-xref="{title}" href="../../../../Additional_Information/Objects_vs_Instances.htm">Objects vs. Instances</a>.</p>
+  <h2 id="func_ref">Function Reference</h2>
+  <h3 id="func_ref_general">General</h3>
+  <ul class="colour">
+    <li><a href="instance_create_layer.htm">instance_create_layer</a></li>
+    <li><a href="instance_create_depth.htm">instance_create_depth</a></li>
+    <li><a href="instance_destroy.htm">instance_destroy</a></li>
+    <li><a href="instance_exists.htm">instance_exists</a></li>
+    <li><a href="instance_change.htm">instance_change</a></li>
+    <li><a href="instance_copy.htm">instance_copy</a></li>
+    <li><a href="instance_find.htm">instance_find</a></li>
+    <li><a href="instance_furthest.htm">instance_furthest</a></li>
+    <li><a href="instance_nearest.htm">instance_nearest</a></li>
+    <li><a href="instance_number.htm">instance_number</a></li>
+    <li><a href="instance_place.htm">instance_place</a></li>
+    <li><a href="instance_place_list.htm">instance_place_list</a></li>
+    <li><a href="instance_position.htm">instance_position</a></li>
+    <li><a href="instance_position_list.htm">instance_position_list</a></li>
+    <li><a data-xref="{title}" href="instance_id_get.htm">instance_id_get</a></li>
+  </ul>
+  <h3 id="func_ref_alarms">Alarms</h3>
+  <p>Instances have a built-in array variable <span class="inline2"><a data-xref="{title}" href="Instance_Variables/alarm.htm">alarm</a></span> that can be use to get or set Alarm Event values, but there are also two functions that can be used to do the same thing:</p>
+  <ul class="colour">
+    <li><a href="alarm_get.htm">alarm_get</a></li>
+    <li><a href="alarm_set.htm">alarm_set</a></li>
+  </ul>
+  <h2 id="var_ref">Variable Reference</h2>
+  <h3>Global</h3>
+  <ul class="colour">
+    <li><a href="instance_id.htm">instance_id</a></li>
+    <li><a href="instance_count.htm">instance_count</a></li>
+  </ul>
+  <h3>Instance</h3>
+  <p>There are a number of built-in variables available within each instance of an object that can be used to control different aspects of how the instance is displayed, how it uses other assets, and how it reacts to collisions, etc., which are all listed here:</p>
+  <ul class="colour">
+    <li><a data-xref="{title}" href="Instance_Variables/Instance_Variables.htm">Built-In Instance Variables</a></li>
+  </ul>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a href="../Asset_Management.htm">Asset Management</a></div>
+        <div style="float:right">Next: <a href="../Rooms/Rooms.htm">Rooms</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+Instances
+-->
+  <!-- TAGS
+instance_functions
+-->
+</body>
+</html>

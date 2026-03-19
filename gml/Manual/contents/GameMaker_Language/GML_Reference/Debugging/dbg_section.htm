@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>dbg_section</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" type="text/css" href="../../../assets/css/default.css" />
+  <script src="../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="" />
+  <meta name="topic-comment" content="" />
+  <meta name="rh-index-keywords" content="dbg_section" />
+  <meta name="search-keywords" content="dbg_section" />
+  <meta name="template" content="assets/masterpages/Manual_Keyword_Page.htt" />
+</head>
+<body>
+  <h1><span data-field="title" data-format="default">dbg_section</span></h1>
+  <p style="text-align: left; ">This function creates a section in the current view and shows it in <a data-xref="{title}" href="The_Debug_Overlay.htm">The Debug Overlay</a>. A debug section groups together multiple debug controls inside a debug view.</p>
+  <p style="text-align: left; ">The active section can later be changed using <span class="inline3_func"><a data-xref="{title}" href="dbg_set_section.htm">dbg_set_section</a></span>.</p>
+  <p class="note"><span data-conref="../../../assets/snippets/Tag_note.hts"> </span> If no debug view is active then the section is added to a new debug view named <span data-keyref="DebugView_Name_Default">&quot;Default&quot;</span>.</p>
+  <h3>Usage Notes</h3>
+  <ul class="Disc">
+    <li>Most controls span two columns, others only a single one (<span class="inline3_func"><a data-xref="{title}" href="dbg_text.htm">dbg_text</a></span> and <span class="inline3_func"><a data-xref="{title}" href="dbg_button.htm">dbg_button</a></span>).</li>
+    <li>Two single-column controls can be placed on the same row by calling <span class="inline3_func"><a data-xref="{title}" href="dbg_same_line.htm">dbg_same_line</a></span>.</li>
+    <li>A debug section&#39;s contents can be copy-pasted to and from the clipboard as <a class="glossterm" data-glossterm="JSON" href="#">JSON</a> using the <strong>Copy</strong> and <strong>Paste</strong> buttons.</li>
+  </ul>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">dbg_section</span>(name [, open])</p>
+  <table>
+    <colgroup>
+      <col />
+      <col />
+      <col />
+    </colgroup>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>name</td>
+        <td><span data-keyref="Type_String"><a href="../../GML_Overview/Data_Types.htm" target="_blank">String</a></span></td>
+        <td>The name of the new debug section</td>
+      </tr>
+      <tr>
+        <td>open</td>
+        <td><span data-keyref="Type_Bool"><a href="../../GML_Overview/Data_Types.htm" target="_blank">Boolean</a></span></td>
+        <td><span data-conref="../../../assets/snippets/Tag_optional.hts"> </span> <span class="inline2">true</span> if the section should be open when it&#39;s created, <span class="inline2">false</span> if not (default is <span class="inline2">true</span>)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Pointer_DebugSection"><a href="dbg_section.htm" target="_blank">Debug Section Pointer</a></span></p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">dbg_view(&quot;CustomDebugView&quot;);<br />
+    <span data-field="title" data-format="default">dbg_section</span>(&quot;Player Variables&quot;);
+  </p>
+  <p>The code above creates a new debug view using <span class="inline3_func"><a data-xref="{title}" href="dbg_view.htm">dbg_view</a></span> named &quot;CustomDebugView&quot; and adds a new section &quot;Player Variables&quot; to it using <span class="inline3_func"><span data-field="title" data-format="default">dbg_section</span></span>.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div>Back: <a data-xref="{title}" href="The_Debug_Overlay.htm">The Debug Overlay</a></div>
+        <div>Next: <a data-xref="{title}" href="dbg_section_exists.htm">dbg_section_exists</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+dbg_section
+-->
+  <!-- TAGS
+dbg_section
+-->
+</body>
+</html>

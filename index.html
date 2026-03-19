@@ -28,24 +28,24 @@
   /* ── Layout ───────────────────────────────────────────────────────── */
   #app { display: flex; height: 100vh; overflow: hidden; }
 
-  /* ── Sidebar ──────────────────────────────────────────────────────── */
-  #sidebar {
+  /* ── Left chat rail ───────────────────────────────────────────────── */
+  #chat-rail {
     width: var(--sidebar-w);
     min-width: var(--sidebar-w);
     background: var(--surface);
-    border-left: 1px solid var(--border);
+    border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     overflow: hidden;
   }
-  #sidebar-header {
+  #chat-rail-header {
     padding: 14px 12px 10px;
     border-bottom: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     gap: 8px;
   }
-  #sidebar-header h1 { font-size: 15px; font-weight: 600; color: var(--text); }
+  #chat-rail-header h1 { font-size: 15px; font-weight: 600; color: var(--text); }
   #new-chat-btn {
     background: var(--accent);
     color: #fff;
@@ -100,12 +100,29 @@
   .conv-del:hover { color: var(--error); background: rgba(255,107,107,0.1); }
   .conv-item:hover .conv-del { display: block; }
 
-  #sidebar-footer {
+  /* ── Right tools rail ─────────────────────────────────────────────── */
+  #tools-rail {
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #tools-rail-header {
+    padding: 14px 12px 10px;
+    border-bottom: 1px solid var(--border);
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  #tools-rail-body {
     padding: 10px 12px 14px;
-    border-top: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     gap: 10px;
+    overflow-y: auto;
   }
   .setting-group label { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; display: block; }
   .setting-group input {
@@ -118,7 +135,8 @@
     font-size: 13px;
   }
   .setting-group input:focus { outline: none; border-color: var(--accent); }
-  #brave-save-btn {
+  #brave-save-btn,
+  #admin-create-invite-btn {
     margin-top: 5px;
     width: 100%;
     background: var(--surface2);
@@ -130,7 +148,8 @@
     cursor: pointer;
     transition: border-color 0.15s, color 0.15s;
   }
-  #brave-save-btn:hover { border-color: var(--accent); color: var(--text); }
+  #brave-save-btn:hover,
+  #admin-create-invite-btn:hover { border-color: var(--accent); color: var(--text); }
   #brave-status { font-size: 11px; color: var(--text-dim); text-align: center; min-height: 14px; margin-top: 3px; }
 
   /* ── Main area ────────────────────────────────────────────────────── */
@@ -374,6 +393,169 @@
     gap: 12px;
   }
 
+  /* ── Auth gate ────────────────────────────────────────────────────── */
+  #auth-gate {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 28px;
+    background:
+      radial-gradient(circle at 15% 15%, rgba(255, 107, 243, 0.2), transparent 36%),
+      radial-gradient(circle at 90% 90%, rgba(156, 58, 140, 0.22), transparent 38%),
+      var(--bg);
+  }
+  .auth-shell {
+    width: min(920px, 100%);
+    background: linear-gradient(165deg, rgba(36, 36, 36, 0.95), rgba(26, 26, 26, 0.95));
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    display: grid;
+    grid-template-columns: 1.2fr 1fr;
+    overflow: hidden;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+  }
+  .auth-brand {
+    padding: 28px;
+    border-right: 1px solid var(--border);
+    background: linear-gradient(145deg, rgba(255, 107, 243, 0.09), rgba(30, 32, 48, 0.6));
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    justify-content: center;
+  }
+  .auth-brand h2 { font-size: 30px; line-height: 1.1; }
+  .auth-brand p { color: var(--text-dim); line-height: 1.5; }
+  .auth-brand ul {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-top: 6px;
+    font-size: 13px;
+    color: #e9c2e2;
+  }
+  .auth-panel {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .auth-tabs { display: flex; gap: 6px; }
+  .auth-tab {
+    flex: 1;
+    background: var(--surface2);
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .auth-tab.active {
+    color: #fff;
+    background: var(--accent-dim);
+    border-color: var(--accent-dim);
+  }
+  .auth-form { display: none; margin-top: 4px; }
+  .auth-form.active { display: block; }
+  .auth-btn {
+    margin-top: 8px;
+    width: 100%;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .auth-btn:hover { background: var(--accent-dim); }
+  .auth-btn:disabled { opacity: 0.65; cursor: not-allowed; }
+  #auth-status { min-height: 18px; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+  /* ── Account and admin panel ─────────────────────────────────────── */
+  #account-box {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface2);
+    padding: 8px;
+  }
+  #account-line { font-size: 12px; }
+  #account-role { color: var(--accent); text-transform: uppercase; letter-spacing: 0.06em; font-size: 10px; }
+  #logout-btn {
+    margin-top: 6px;
+    width: 100%;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-dim);
+    padding: 5px 8px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  #logout-btn:hover { border-color: var(--accent); color: var(--text); }
+
+  #admin-panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface2);
+    padding: 8px;
+    display: none;
+    gap: 8px;
+    flex-direction: column;
+  }
+  #admin-panel h3 { font-size: 12px; color: var(--text); }
+  #admin-status { min-height: 14px; font-size: 11px; color: var(--text-dim); }
+  #admin-users {
+    max-height: 140px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border);
+    margin-top: 4px;
+    padding-top: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .admin-user-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
+    align-items: center;
+    font-size: 12px;
+  }
+  .admin-user-meta { color: var(--text-dim); font-size: 11px; }
+  .admin-del-btn {
+    border: 1px solid rgba(255, 107, 107, 0.35);
+    color: var(--error);
+    background: rgba(255, 107, 107, 0.08);
+    border-radius: 6px;
+    padding: 3px 6px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+
+  @media (max-width: 900px) {
+    .auth-shell { grid-template-columns: 1fr; }
+    .auth-brand { border-right: none; border-bottom: 1px solid var(--border); }
+  }
+
+  @media (max-width: 1080px) {
+    #app { flex-direction: column; height: auto; min-height: 100vh; }
+    #chat-rail,
+    #tools-rail {
+      width: 100%;
+      min-width: 0;
+      max-height: 220px;
+      border-left: none;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    #main { min-height: 55vh; }
+  }
+
   /* ── Scrollbar ────────────────────────────────────────────────────── */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -381,7 +563,66 @@
 </style>
 </head>
 <body>
-<div id="app">
+<div id="auth-gate">
+  <section class="auth-shell">
+    <div class="auth-brand">
+      <h2>Welcome to DollChat</h2>
+      <p>Private access for invited users only. Log in to keep conversations scoped to your account.</p>
+      <ul>
+        <li>Invite-only signup for trusted users</li>
+        <li>Admin can create or remove accounts</li>
+        <li>Your chats stay isolated per user</li>
+      </ul>
+    </div>
+    <div class="auth-panel">
+      <div class="auth-tabs">
+        <button id="tab-login" class="auth-tab active" type="button">Log In</button>
+        <button id="tab-signup" class="auth-tab" type="button">Sign Up</button>
+      </div>
+
+      <form id="login-form" class="auth-form active">
+        <div class="setting-group">
+          <label for="login-username">Username</label>
+          <input id="login-username" type="text" autocomplete="username" />
+        </div>
+        <div class="setting-group">
+          <label for="login-password">Password</label>
+          <input id="login-password" type="password" autocomplete="current-password" />
+        </div>
+        <button id="login-btn" class="auth-btn" type="submit">Log In</button>
+      </form>
+
+      <form id="signup-form" class="auth-form">
+        <div class="setting-group">
+          <label for="signup-username">Username</label>
+          <input id="signup-username" type="text" autocomplete="username" />
+        </div>
+        <div class="setting-group">
+          <label for="signup-password">Password</label>
+          <input id="signup-password" type="password" autocomplete="new-password" />
+        </div>
+        <div class="setting-group">
+          <label for="signup-invite">Invite Token</label>
+          <input id="signup-invite" type="text" autocomplete="off" />
+        </div>
+        <button id="signup-btn" class="auth-btn" type="submit">Create Account</button>
+      </form>
+
+      <div id="auth-status"></div>
+    </div>
+  </section>
+</div>
+
+<div id="app" style="display:none;">
+
+  <!-- ── Left rail: Chats ──────────────────────────────────────────── -->
+  <aside id="chat-rail">
+    <div id="chat-rail-header">
+      <h1>Ollama Chat</h1>
+      <button id="new-chat-btn">+ New Chat</button>
+    </div>
+    <div id="conv-list"></div>
+  </aside>
 
   <!-- ── Main ──────────────────────────────────────────────────────── -->
   <main id="main">
@@ -411,14 +652,33 @@
     </div>
   </main>
 
-  <!-- ── Sidebar (right) ───────────────────────────────────────────── -->
-  <aside id="sidebar">
-    <div id="sidebar-header">
-      <h1>Ollama Chat</h1>
-      <button id="new-chat-btn">+ New Chat</button>
-    </div>
-    <div id="conv-list"></div>
-    <div id="sidebar-footer">
+  <!-- ── Right rail: Admin and tools ───────────────────────────────── -->
+  <aside id="tools-rail">
+    <div id="tools-rail-header">Workspace Tools</div>
+    <div id="tools-rail-body">
+      <div id="account-box">
+        <div id="account-role">User</div>
+        <div id="account-line">Signed in as <strong id="account-username">-</strong></div>
+        <button id="logout-btn" type="button">Log out</button>
+      </div>
+
+      <div id="admin-panel">
+        <h3>Admin: User Access</h3>
+        <div class="setting-group">
+          <label for="admin-new-username">New Username</label>
+          <input id="admin-new-username" type="text" autocomplete="off" />
+        </div>
+        <div class="setting-group">
+          <label for="admin-new-password">New Password</label>
+          <input id="admin-new-password" type="password" autocomplete="off" />
+        </div>
+        <button id="admin-create-user-btn" class="auth-btn" type="button">Create User</button>
+        <button id="admin-create-invite-btn" type="button">Generate Invite Token</button>
+        <div id="admin-invite-token" style="font-size:11px;color:var(--text-dim);word-break:break-all;"></div>
+        <div id="admin-status"></div>
+        <div id="admin-users"></div>
+      </div>
+
       <div class="setting-group">
         <label for="model-input">Model</label>
         <input id="model-input" type="text" value="huihui_ai/qwen3-abliterated:8b" autocomplete="off" spellcheck="false" />
@@ -435,33 +695,203 @@
 
 <script>
 /* ── State ──────────────────────────────────────────────────────────── */
-let activeConvId = null;   // current conversation UUID
-let streaming    = false;
+let activeConvId = null;
+let streaming = false;
+let authToken = localStorage.getItem('auth_token') || '';
+let currentUser = null;
 
 /* ── DOM refs ────────────────────────────────────────────────────────── */
-const convListEl  = document.getElementById('conv-list');
-const messagesEl  = document.getElementById('messages');
-const emptyEl     = document.getElementById('empty-state');
-const userInput   = document.getElementById('user-input');
-const sendBtn     = document.getElementById('send-btn');
-const modelInput  = document.getElementById('model-input');
-const newChatBtn  = document.getElementById('new-chat-btn');
+const appEl = document.getElementById('app');
+const authGateEl = document.getElementById('auth-gate');
+const authStatusEl = document.getElementById('auth-status');
+const tabLoginEl = document.getElementById('tab-login');
+const tabSignupEl = document.getElementById('tab-signup');
+const loginFormEl = document.getElementById('login-form');
+const signupFormEl = document.getElementById('signup-form');
 
-/* ── Auto-resize textarea ────────────────────────────────────────────── */
+const convListEl = document.getElementById('conv-list');
+const messagesEl = document.getElementById('messages');
+const emptyEl = document.getElementById('empty-state');
+const userInput = document.getElementById('user-input');
+const sendBtn = document.getElementById('send-btn');
+const modelInput = document.getElementById('model-input');
+const newChatBtn = document.getElementById('new-chat-btn');
+
+const accountUsernameEl = document.getElementById('account-username');
+const accountRoleEl = document.getElementById('account-role');
+const logoutBtn = document.getElementById('logout-btn');
+
+const adminPanelEl = document.getElementById('admin-panel');
+const adminUsersEl = document.getElementById('admin-users');
+const adminStatusEl = document.getElementById('admin-status');
+const adminNewUsernameEl = document.getElementById('admin-new-username');
+const adminNewPasswordEl = document.getElementById('admin-new-password');
+const adminCreateUserBtn = document.getElementById('admin-create-user-btn');
+const adminCreateInviteBtn = document.getElementById('admin-create-invite-btn');
+const adminInviteTokenEl = document.getElementById('admin-invite-token');
+
+const braveKeyInput = document.getElementById('brave-key-input');
+const braveSaveBtn = document.getElementById('brave-save-btn');
+const braveStatusEl = document.getElementById('brave-status');
+
+/* ── Auth helpers ───────────────────────────────────────────────────── */
+function setAuthToken(token) {
+  authToken = token || '';
+  if (authToken) {
+    localStorage.setItem('auth_token', authToken);
+  } else {
+    localStorage.removeItem('auth_token');
+  }
+}
+
+function showAuthGate(message = '') {
+  appEl.style.display = 'none';
+  authGateEl.style.display = 'flex';
+  authStatusEl.textContent = message;
+  authStatusEl.style.color = message ? 'var(--text)' : 'var(--text-dim)';
+}
+
+function showApp() {
+  authGateEl.style.display = 'none';
+  appEl.style.display = 'flex';
+}
+
+function switchAuthTab(mode) {
+  const isLogin = mode === 'login';
+  tabLoginEl.classList.toggle('active', isLogin);
+  tabSignupEl.classList.toggle('active', !isLogin);
+  loginFormEl.classList.toggle('active', isLogin);
+  signupFormEl.classList.toggle('active', !isLogin);
+  authStatusEl.textContent = '';
+}
+
+async function apiFetch(url, options = {}) {
+  const { throwOnError = true, ...fetchOptions } = options;
+  const headers = new Headers(fetchOptions.headers || {});
+  if (authToken) headers.set('Authorization', `Bearer ${authToken}`);
+  fetchOptions.headers = headers;
+
+  const res = await fetch(url, fetchOptions);
+  if (res.status === 401) {
+    setAuthToken('');
+    currentUser = null;
+    showAuthGate('Session expired. Please log in again.');
+    if (throwOnError) throw new Error('Unauthorized');
+  }
+
+  if (throwOnError && !res.ok) {
+    const body = await res.text();
+    let message = body || `Request failed (${res.status})`;
+    try {
+      const parsed = JSON.parse(body);
+      if (parsed.detail) message = parsed.detail;
+    } catch {}
+    throw new Error(message);
+  }
+  return res;
+}
+
+/* ── App bootstrap/auth actions ─────────────────────────────────────── */
+async function applyAuthenticatedState(user) {
+  currentUser = user;
+  accountUsernameEl.textContent = user.username;
+  accountRoleEl.textContent = user.role;
+  adminPanelEl.style.display = user.role === 'admin' ? 'flex' : 'none';
+  if (user.role === 'admin') {
+    await loadAdminUsers();
+  }
+  showApp();
+  clearMessages();
+  await Promise.all([loadConversations(), loadBraveStatus()]);
+  userInput.focus();
+}
+
+async function handleLoginSubmit(event) {
+  event.preventDefault();
+  const username = document.getElementById('login-username').value.trim();
+  const password = document.getElementById('login-password').value;
+  const loginBtn = document.getElementById('login-btn');
+
+  loginBtn.disabled = true;
+  authStatusEl.style.color = 'var(--text-dim)';
+  authStatusEl.textContent = 'Signing in...';
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || 'Login failed');
+    }
+    setAuthToken(data.access_token);
+    await applyAuthenticatedState(data.user);
+  } catch (err) {
+    authStatusEl.style.color = 'var(--error)';
+    authStatusEl.textContent = err.message || 'Login failed';
+  } finally {
+    loginBtn.disabled = false;
+  }
+}
+
+async function handleSignupSubmit(event) {
+  event.preventDefault();
+  const username = document.getElementById('signup-username').value.trim();
+  const password = document.getElementById('signup-password').value;
+  const inviteToken = document.getElementById('signup-invite').value.trim();
+  const signupBtn = document.getElementById('signup-btn');
+
+  signupBtn.disabled = true;
+  authStatusEl.style.color = 'var(--text-dim)';
+  authStatusEl.textContent = 'Creating account...';
+  try {
+    const res = await fetch('/api/auth/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, invite_token: inviteToken }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.detail || 'Signup failed');
+    }
+    setAuthToken(data.access_token);
+    await applyAuthenticatedState(data.user);
+  } catch (err) {
+    authStatusEl.style.color = 'var(--error)';
+    authStatusEl.textContent = err.message || 'Signup failed';
+  } finally {
+    signupBtn.disabled = false;
+  }
+}
+
+function logout(message = 'Logged out') {
+  setAuthToken('');
+  currentUser = null;
+  activeConvId = null;
+  convListEl.innerHTML = '';
+  clearMessages();
+  showAuthGate(message);
+}
+
+/* ── Auto-resize textarea ───────────────────────────────────────────── */
 userInput.addEventListener('input', () => {
   userInput.style.height = 'auto';
   userInput.style.height = Math.min(userInput.scrollHeight, 160) + 'px';
 });
 
-/* ── Send on Enter (Shift+Enter = newline) ────────────────────────────── */
+/* ── Send on Enter ──────────────────────────────────────────────────── */
 userInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleSend();
+  }
 });
 sendBtn.addEventListener('click', handleSend);
 
-/* ── Conversations API ───────────────────────────────────────────────── */
+/* ── Conversations API ──────────────────────────────────────────────── */
 async function loadConversations() {
-  const res  = await fetch('/api/conversations');
+  const res = await apiFetch('/api/conversations');
   const list = await res.json();
   renderConvList(list);
 }
@@ -472,6 +902,7 @@ function renderConvList(list) {
     convListEl.innerHTML = '<p style="padding:12px;color:var(--text-dim);font-size:12px;">No conversations yet</p>';
     return;
   }
+
   for (const c of list) {
     const item = document.createElement('div');
     item.className = 'conv-item' + (c.id === activeConvId ? ' active' : '');
@@ -498,13 +929,17 @@ function renderConvList(list) {
 }
 
 async function createConversation() {
-  const res  = await fetch('/api/conversations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: 'New Chat' }) });
+  const res = await apiFetch('/api/conversations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: 'New Chat' }),
+  });
   const data = await res.json();
   return data.id;
 }
 
 async function deleteConversation(id) {
-  await fetch(`/api/conversations/${id}`, { method: 'DELETE' });
+  await apiFetch(`/api/conversations/${id}`, { method: 'DELETE' });
   if (activeConvId === id) {
     activeConvId = null;
     clearMessages();
@@ -515,17 +950,18 @@ async function deleteConversation(id) {
 async function selectConversation(id) {
   activeConvId = id;
   clearMessages();
-  const res  = await fetch(`/api/conversations/${id}/messages`);
+  const res = await apiFetch(`/api/conversations/${id}/messages`);
   const msgs = await res.json();
   for (const m of msgs) {
-    if (m.role === 'user')      appendUserMessage(m.content);
+    if (m.role === 'user') appendUserMessage(m.content);
     if (m.role === 'assistant') appendAssistantMessage(m.content, m.thinking, false, false);
   }
   scrollToBottom();
-  await loadConversations(); // re-render to highlight active
+  await loadConversations();
 }
 
 newChatBtn.addEventListener('click', async () => {
+  if (!currentUser) return;
   const id = await createConversation();
   activeConvId = id;
   clearMessages();
@@ -533,7 +969,7 @@ newChatBtn.addEventListener('click', async () => {
   userInput.focus();
 });
 
-/* ── Message rendering ───────────────────────────────────────────────── */
+/* ── Message rendering ──────────────────────────────────────────────── */
 function hideEmpty() { emptyEl.style.display = 'none'; }
 function showEmpty() { emptyEl.style.display = ''; }
 
@@ -549,7 +985,7 @@ function scrollToBottom() {
 
 function appendUserMessage(text) {
   hideEmpty();
-  const row   = document.createElement('div');
+  const row = document.createElement('div');
   row.className = 'msg-row user';
 
   const av = document.createElement('div');
@@ -571,10 +1007,6 @@ function appendUserMessage(text) {
   return row;
 }
 
-/**
- * Append an assistant message shell.
- * Returns { thinkingContent, contentBubble, details, ftsEl } refs for streaming updates.
- */
 function appendAssistantMessage(initialContent = '', initialThinking = '', withCursor = false, showFts = false, searchCount = 0) {
   hideEmpty();
   const row = document.createElement('div');
@@ -587,7 +1019,6 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   const body = document.createElement('div');
   body.className = 'msg-body';
 
-  // Badge row: FTS + web search count
   const badgeRow = document.createElement('div');
   badgeRow.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;';
 
@@ -605,12 +1036,10 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   badgeRow.appendChild(webEl);
   body.appendChild(badgeRow);
 
-  // Container for live search indicators
   const searchIndicatorsEl = document.createElement('div');
   searchIndicatorsEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
   body.appendChild(searchIndicatorsEl);
 
-  // Thinking block
   const details = document.createElement('details');
   details.className = 'thinking-block';
   if (!initialThinking) details.style.display = 'none';
@@ -618,9 +1047,9 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   const summary = document.createElement('summary');
   const spinner = document.createElement('span');
   spinner.className = 'think-spinner';
-  if (!withCursor) spinner.style.display = 'none'; // only show spinner while streaming
+  if (!withCursor) spinner.style.display = 'none';
   summary.appendChild(spinner);
-  summary.append(' Thinking…');
+  summary.append(' Thinking...');
 
   const thinkingContent = document.createElement('div');
   thinkingContent.className = 'thinking-content';
@@ -630,7 +1059,6 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   details.appendChild(thinkingContent);
   body.appendChild(details);
 
-  // Response bubble
   const bubble = document.createElement('div');
   bubble.className = 'bubble' + (withCursor ? ' cursor' : '');
   bubble.textContent = initialContent;
@@ -641,16 +1069,16 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   messagesEl.appendChild(row);
   scrollToBottom();
 
-  return { thinkingContent, contentBubble: bubble, details, summary, spinner, ftsEl, webEl, searchIndicatorsEl };
+  return { thinkingContent, contentBubble: bubble, details, spinner, ftsEl, webEl, searchIndicatorsEl };
 }
 
-/* ── Send & stream ───────────────────────────────────────────────────── */
+/* ── Send and stream ────────────────────────────────────────────────── */
 async function handleSend() {
-  if (streaming) return;
+  if (!currentUser || streaming) return;
+
   const text = userInput.value.trim();
   if (!text) return;
 
-  // Create conversation on first message if needed
   if (!activeConvId) {
     activeConvId = await createConversation();
     await loadConversations();
@@ -663,24 +1091,25 @@ async function handleSend() {
   streaming = true;
   sendBtn.disabled = true;
 
-  const { thinkingContent, contentBubble, details, summary, spinner, ftsEl, webEl, searchIndicatorsEl } =
+  const { thinkingContent, contentBubble, details, spinner, ftsEl, webEl, searchIndicatorsEl } =
     appendAssistantMessage('', '', true, false, 0);
 
   let hasThinking = false;
-  let hasContent  = false;
+  let hasContent = false;
   let searchesDone = 0;
-  const activeSearchEls = new Map(); // query → indicator element
+  const activeSearchEls = new Map();
 
   try {
-    const res = await fetch('/api/chat', {
+    const res = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         conversation_id: activeConvId,
-        message:         text,
-        model:           modelInput.value.trim() || 'huihui_ai/qwen3-abliterated:8b',
-        think:           true,
+        message: text,
+        model: modelInput.value.trim() || 'huihui_ai/qwen3-abliterated:8b',
+        think: true,
       }),
+      throwOnError: false,
     });
 
     if (!res.ok) {
@@ -691,9 +1120,9 @@ async function handleSend() {
       return;
     }
 
-    const reader  = res.body.getReader();
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    let   buffer  = '';
+    let buffer = '';
 
     while (true) {
       const { value, done } = await reader.read();
@@ -701,29 +1130,30 @@ async function handleSend() {
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n\n');
-      buffer = lines.pop(); // keep incomplete last chunk
+      buffer = lines.pop();
 
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
         let evt;
-        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+        try {
+          evt = JSON.parse(line.slice(6));
+        } catch {
+          continue;
+        }
 
         if (evt.type === 'thinking') {
           if (!hasThinking) {
             details.style.display = '';
-            details.open = true; // auto-open while streaming
+            details.open = true;
             hasThinking = true;
           }
           thinkingContent.textContent += evt.delta;
-          // keep thinking scrolled to bottom
           thinkingContent.scrollTop = thinkingContent.scrollHeight;
           scrollToBottom();
 
         } else if (evt.type === 'content') {
           if (!hasContent) {
-            // Switch summary from "Thinking…" to "Reasoning" once content starts
             spinner.style.display = 'none';
-            // Collapse thinking once response starts (user can re-open)
             if (hasThinking) details.open = false;
             hasContent = true;
           }
@@ -738,7 +1168,7 @@ async function handleSend() {
           ind.appendChild(si);
           const lbl = document.createElement('span');
           lbl.textContent = evt.error
-            ? `⚠ Skipped (no API key): ${evt.query}`
+            ? `Skipped (no API key): ${evt.query}`
             : `Searching: ${evt.query}`;
           ind.appendChild(lbl);
           searchIndicatorsEl.appendChild(ind);
@@ -751,7 +1181,7 @@ async function handleSend() {
             ind.classList.add('done');
             ind.querySelector('.si-spinner').style.display = 'none';
             ind.querySelector('span:last-child').textContent =
-              `✓ ${evt.count} result${evt.count !== 1 ? 's' : ''} for: ${evt.query}`;
+              `Done: ${evt.count} result${evt.count !== 1 ? 's' : ''} for ${evt.query}`;
           }
           scrollToBottom();
 
@@ -776,7 +1206,7 @@ async function handleSend() {
   } catch (err) {
     contentBubble.classList.remove('cursor');
     contentBubble.className = 'error-bubble';
-    contentBubble.textContent = `Connection error: ${err.message}`;
+    contentBubble.textContent = `Connection error: ${err.message || err}`;
   } finally {
     streaming = false;
     sendBtn.disabled = false;
@@ -784,32 +1214,30 @@ async function handleSend() {
   }
 }
 
-/* ── Init ────────────────────────────────────────────────────────────── */
-/* ── Brave API key settings ──────────────────────────────────────────── */
-const braveKeyInput = document.getElementById('brave-key-input');
-const braveSaveBtn  = document.getElementById('brave-save-btn');
-const braveStatusEl = document.getElementById('brave-status');
-
+/* ── Brave API key settings ─────────────────────────────────────────── */
 async function loadBraveStatus() {
   try {
-    const res  = await fetch('/api/settings');
+    const res = await apiFetch('/api/settings');
     const data = await res.json();
     if (data.brave_api_key_set) {
       braveStatusEl.textContent = `Key saved (${data.brave_api_key_masked})`;
       braveStatusEl.style.color = 'var(--accent)';
     } else {
-      braveStatusEl.textContent = 'No key — web search disabled';
+      braveStatusEl.textContent = 'No key - web search disabled';
       braveStatusEl.style.color = 'var(--text-dim)';
     }
-  } catch { /* ignore */ }
+  } catch {
+    braveStatusEl.textContent = 'Could not load key status';
+    braveStatusEl.style.color = 'var(--error)';
+  }
 }
 
 braveSaveBtn.addEventListener('click', async () => {
   const key = braveKeyInput.value.trim();
   braveSaveBtn.disabled = true;
-  braveSaveBtn.textContent = 'Saving…';
+  braveSaveBtn.textContent = 'Saving...';
   try {
-    await fetch('/api/settings', {
+    await apiFetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ brave_api_key: key }),
@@ -825,9 +1253,131 @@ braveSaveBtn.addEventListener('click', async () => {
   }
 });
 
-/* ── Init ────────────────────────────────────────────────────────────── */
+/* ── Admin actions ──────────────────────────────────────────────────── */
+function setAdminStatus(message, isError = false) {
+  adminStatusEl.textContent = message;
+  adminStatusEl.style.color = isError ? 'var(--error)' : 'var(--text-dim)';
+}
+
+async function loadAdminUsers() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+  const res = await apiFetch('/api/admin/users');
+  const users = await res.json();
+  renderAdminUsers(users);
+}
+
+function renderAdminUsers(users) {
+  adminUsersEl.innerHTML = '';
+  for (const user of users) {
+    const row = document.createElement('div');
+    row.className = 'admin-user-row';
+
+    const meta = document.createElement('div');
+    const title = document.createElement('div');
+    title.textContent = `${user.username}`;
+    const info = document.createElement('div');
+    info.className = 'admin-user-meta';
+    info.textContent = `${user.role}${user.id === currentUser.id ? ' (you)' : ''}`;
+    meta.appendChild(title);
+    meta.appendChild(info);
+
+    row.appendChild(meta);
+    if (user.id !== currentUser.id) {
+      const del = document.createElement('button');
+      del.className = 'admin-del-btn';
+      del.textContent = 'Delete';
+      del.addEventListener('click', async () => {
+        if (!confirm(`Delete user ${user.username}?`)) return;
+        try {
+          await apiFetch(`/api/admin/users/${user.id}`, { method: 'DELETE' });
+          setAdminStatus(`Deleted ${user.username}`);
+          await loadAdminUsers();
+        } catch (err) {
+          setAdminStatus(err.message || 'Delete failed', true);
+        }
+      });
+      row.appendChild(del);
+    } else {
+      const selfTag = document.createElement('div');
+      selfTag.className = 'admin-user-meta';
+      selfTag.textContent = 'Current';
+      row.appendChild(selfTag);
+    }
+
+    adminUsersEl.appendChild(row);
+  }
+}
+
+adminCreateUserBtn.addEventListener('click', async () => {
+  const username = adminNewUsernameEl.value.trim();
+  const password = adminNewPasswordEl.value;
+  if (!username || !password) {
+    setAdminStatus('Username and password are required', true);
+    return;
+  }
+  adminCreateUserBtn.disabled = true;
+  setAdminStatus('Creating user...');
+  try {
+    await apiFetch('/api/admin/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, role: 'user' }),
+    });
+    adminNewUsernameEl.value = '';
+    adminNewPasswordEl.value = '';
+    setAdminStatus(`User ${username} created`);
+    await loadAdminUsers();
+  } catch (err) {
+    setAdminStatus(err.message || 'Could not create user', true);
+  } finally {
+    adminCreateUserBtn.disabled = false;
+  }
+});
+
+adminCreateInviteBtn.addEventListener('click', async () => {
+  adminCreateInviteBtn.disabled = true;
+  setAdminStatus('Generating invite token...');
+  try {
+    const res = await apiFetch('/api/admin/invites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expires_in_days: 7 }),
+    });
+    const data = await res.json();
+    adminInviteTokenEl.textContent = `Invite token: ${data.token}`;
+    setAdminStatus('Invite token created');
+  } catch (err) {
+    setAdminStatus(err.message || 'Could not create invite', true);
+  } finally {
+    adminCreateInviteBtn.disabled = false;
+  }
+});
+
+/* ── Wire auth controls ─────────────────────────────────────────────── */
+tabLoginEl.addEventListener('click', () => switchAuthTab('login'));
+tabSignupEl.addEventListener('click', () => switchAuthTab('signup'));
+loginFormEl.addEventListener('submit', handleLoginSubmit);
+signupFormEl.addEventListener('submit', handleSignupSubmit);
+logoutBtn.addEventListener('click', () => logout('Logged out successfully.'));
+
+/* ── Init ───────────────────────────────────────────────────────────── */
 (async () => {
-  await Promise.all([loadConversations(), loadBraveStatus()]);
+  if (!authToken) {
+    showAuthGate();
+    return;
+  }
+
+  try {
+    const res = await apiFetch('/api/auth/me', { throwOnError: false });
+    if (!res.ok) {
+      showAuthGate();
+      return;
+    }
+    const me = await res.json();
+    await applyAuthenticatedState(me);
+  } catch {
+    showAuthGate();
+  }
 })();
 </script>
 </body>

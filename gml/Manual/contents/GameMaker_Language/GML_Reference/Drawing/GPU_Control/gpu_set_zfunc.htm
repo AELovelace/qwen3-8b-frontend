@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>gpu_set_zfunc</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Reference for the function gpu_set_zfunc" />
+  <meta name="rh-index-keywords" content="gpu_set_zfunc,cmpfunc_never,cmpfunc_less,cmpfunc_equal,cmpfunc_lessequal,cmpfunc_greater,cmpfunc_notequal,cmpfunc_greaterequal,cmpfunc_always" />
+  <meta name="search-keywords" content="gpu_set_zfunc,cmpfunc_never,cmpfunc_less,cmpfunc_equal,cmpfunc_lessequal,cmpfunc_greater,cmpfunc_notequal,cmpfunc_greaterequal,cmpfunc_always" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">gpu_set_zfunc</span></h1>
+  <p>This function sets the z-buffer testing comparison mode (see <span class="inline3_func"><a data-xref="{title}" href="gpu_set_ztestenable.htm">gpu_set_ztestenable</a></span> for more information).</p>
+  <p>The values available for use are any of the following constants (the default value is <span class="inline2"><span data-keyref="Const_ZFunc_Default">cmpfunc_lessequal</span></span>):</p>
+  <div data-conref="../../../../assets/snippets/Table_Comparison_Function_Constant.hts"> </div>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">gpu_set_zfunc</span>(cmp_func)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>cmp_func</td>
+        <td><span data-keyref="Type_Constant_Draw_ZComparison"><a href="gpu_get_zfunc.htm" target="_blank">Comparison Function Constant</a></span></td>
+        <td>The comparison mode to use (see list above)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Void">N/A</span></p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">gpu_set_ztestenable(true);<br />
+    gpu_set_zfunc(cmpfunc_always);<br />
+    draw_sprite(spr_Background, 0, 0, 0);<br />
+    gpu_set_ztestenable(false);</p>
+  <p>The above code switches on z-buffer testing and sets its comparison mode before drawing a background sprite and then switches it back off again to continue drawing.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a href="GPU_Control.htm">GPU Control</a></div>
+        <div style="float:right">Next: <a href="gpu_set_zwriteenable.htm">gpu_set_zwriteenable</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2024 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+gpu_set_zfunc
+cmpfunc_never
+cmpfunc_less
+cmpfunc_equal
+cmpfunc_lessequal
+cmpfunc_greater
+cmpfunc_notequal
+cmpfunc_greaterequal
+cmpfunc_always
+-->
+  <!-- TAGS
+gpu_set_zfunc
+-->
+</body>
+</html>

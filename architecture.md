@@ -6,6 +6,7 @@ This project is a local-first chat application with a thin frontend and a FastAP
 
 - Frontend renders conversation UI and consumes streaming SSE events.
 - Backend orchestrates model calls, memory retrieval, optional web search, and persistence.
+- Authentication layer secures API access with bearer tokens and role checks.
 - Ollama provides model inference.
 - SQLite stores conversations/messages and provides FTS5 retrieval.
 
@@ -16,6 +17,7 @@ This project is a local-first chat application with a thin frontend and a FastAP
 3. Ollama HTTP API (`/api/chat`, `/api/tags`)
 4. SQLite database (`memory.db`)
 5. Optional Brave Search API
+6. Invite-only account onboarding and admin user management
 
 ## Backend Module Responsibilities
 
@@ -30,6 +32,14 @@ This project is a local-first chat application with a thin frontend and a FastAP
 
 - CRUD operations for conversations.
 - Message history retrieval by conversation, ordered ascending.
+- User ownership checks for all conversation operations.
+
+### Auth and admin APIs
+
+- JWT-based auth with username/password login.
+- Invite-token signup flow for restricted access.
+- Bootstrap admin created from environment variables when users table is empty.
+- Admin-only user management (list, create, delete, invite generation).
 
 ### Settings APIs
 
@@ -52,7 +62,27 @@ This project is a local-first chat application with a thin frontend and a FastAP
 ### `conversations`
 
 - `id` (TEXT, PK, UUID)
+- `user_id` (TEXT, owner)
 - `title` (TEXT)
+- `created_at` (TEXT, ISO timestamp)
+
+### `users`
+
+- `id` (TEXT, PK, UUID)
+- `username` (TEXT, unique)
+- `password_hash` (TEXT)
+- `role` (`user` or `admin`)
+- `is_active` (INTEGER)
+- `created_at` (TEXT, ISO timestamp)
+
+### `invite_tokens`
+
+- `id` (TEXT, PK, UUID)
+- `token` (TEXT, unique)
+- `created_by` (TEXT user id)
+- `expires_at` (TEXT, nullable)
+- `used_by` (TEXT, nullable)
+- `used_at` (TEXT, nullable)
 - `created_at` (TEXT, ISO timestamp)
 
 ### `messages`
@@ -104,13 +134,14 @@ The frontend keeps one assistant message shell open and updates it incrementally
 ## Request Flow
 
 1. User enters a message in browser.
-2. Frontend ensures conversation exists.
-3. Frontend POSTs to `/api/chat`.
-4. Backend assembles context and calls Ollama streaming endpoint.
-5. Backend relays SSE deltas to browser.
-6. Optional search loop runs if model emits search tags.
-7. Backend saves user + assistant messages to SQLite.
-8. Frontend updates badges (FTS used, search count) and refreshes conversation list.
+2. Frontend ensures session by validating token (`/api/auth/me`).
+3. Frontend ensures conversation exists under current user.
+4. Frontend POSTs to `/api/chat` with bearer token.
+5. Backend authorizes conversation ownership, assembles context, and calls Ollama.
+6. Backend relays SSE deltas to browser.
+7. Optional search loop runs if model emits search tags.
+8. Backend saves user + assistant messages to SQLite.
+9. Frontend updates badges (FTS used, search count) and refreshes conversation list.
 
 ## Reliability and Failure Handling
 
@@ -122,8 +153,11 @@ The frontend keeps one assistant message shell open and updates it incrementally
 ## Security and Trust Boundaries
 
 - App is intended for local use (`localhost` Ollama and local DB/files).
+- API access requires bearer token authentication.
+- Signup is invite-only to support limited sharing.
+- Role-based authorization gates admin management endpoints.
+- Conversations and messages are isolated by owner (`user_id`).
 - Brave key is stored in plaintext `config.json` if set through UI.
-- No authentication or authorization layer is implemented.
 - Inputs are user-provided text and model-generated content; UI renders as plain text to avoid HTML injection.
 
 ## Scalability Notes

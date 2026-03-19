@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>script_execute</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Page explaining the function script_execute" />
+  <meta name="rh-index-keywords" content="script_execute" />
+  <meta name="search-keywords" content="script_execute" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">script_execute</span></h1>
+  <p>This function calls a <span data-keyref="Type_Function_Script"><a href="../../../GML_Overview/Script_Functions.htm" target="_blank">Script Function</a></span> or <span data-keyref="Type_Method"><a href="../../../GML_Overview/Method_Variables.htm" target="_blank">Method</a></span> with the given arguments.</p>
+  <p><span>It calls the script function or method you pass it in the context of the<span> </span></span><b data-stringify-type="bold">calling instance or struct</b>. T<span>o call a method in its bound context, use <span class="inline3_func"><a data-xref="{title}" href="../../Variable_Functions/method_call.htm">method_call</a></span>.</span></p>
+  <p class="note"><span data-conref="../../../../assets/snippets/Tag_note.hts"> </span> This function takes the call arguments as separate parameters. Use <span class="inline3_func"><a data-xref="{title}" href="script_execute_ext.htm">script_execute_ext</a></span> to pass them as an array instead.</p>
+  <div data-conref="../../../../assets/snippets/script_execute_usage_notes.hts"> </div>
+  <ul class="colour">
+  </ul>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">script_execute</span>(scr, arg0, arg1, arg2, etc.)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>scr</td>
+        <td><span data-keyref="Type_Function_Script"><a href="../../../GML_Overview/Script_Functions.htm" target="_blank">Script Function</a></span> or <span data-keyref="Type_Method"><a href="../../../GML_Overview/Method_Variables.htm" target="_blank">Method</a></span> or <span data-keyref="Type_Asset_Script"><a href="../../../../The_Asset_Editors/Scripts.htm" target="_blank">Script Asset</a></span></td>
+        <td>The function/script or method that you want to call. See <a data-xref="{title}" href="../../../GML_Overview/Script_Functions_vs_Methods.htm">Script Functions vs. Methods</a></td>
+      </tr>
+      <tr>
+        <td>arg0, arg1, arg2, etc.</td>
+        <td><span data-keyref="Type_Any"><a href="../../../GML_Overview/Data_Types.htm#variable" target="_blank">Any</a></span></td>
+        <td><span data-conref="../../../../assets/snippets/Tag_optional.hts"> </span> The different arguments that you want to pass through to the function/script</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Any"><a href="../../../GML_Overview/Data_Types.htm#variable" target="_blank">Any</a></span> (Will depend on the return value from the script/function being called)</p>
+  <p> </p>
+  <h4>Example 1: Basic Use</h4>
+  <p class="code"><span data-field="title" data-format="default">script_execute</span>(choose(move_up, move_down, move_left, move_right), irandom(5));</p>
+  <p>The above code calls <span class="inline3_func"><span data-field="title" data-format="default">script_execute</span></span> to choose one of four user-defined functions (in this case related to movement) and passes a random integer to it as the first argument.</p>
+  <p> </p>
+  <h4>Example 2: Calling a Constructor Function</h4>
+  <p class="code">function StructA() constructor<br />
+    {<br />
+        a = 1;<br />
+        b = 2;<br />
+        c = &quot;Hello&quot;;<br />
+    }<br />
+    function StructB() constructor<br />
+    {<br />
+        d = 3;<br />
+        e = 4;<br />
+        f = &quot;!&quot;;<br />
+    }<br />
+    <br />
+    the_struct = {};<br />
+    with(the_struct)<br />
+    {<br />
+        <span data-field="title" data-format="default">script_execute</span>(StructA);<br />
+        <span data-field="title" data-format="default">script_execute</span>(StructB);<br />
+    }<br />
+    show_debug_message($&quot;{instanceof(the_struct)} -&gt; {the_struct}&quot;);
+  </p>
+  <p>The above code shows how to call a constructor function using <span class="inline3_func"><span data-field="title" data-format="default">script_execute</span></span>.</p>
+  <p style="text-align: left; ">First, two constructor functions are defined. Then an empty struct is created and stored in a variable <font face="menlo, consolas, monospace"><span class="inline2">the_struct</span></font>. The scope is then changed to that of <span class="inline2">the_struct</span> using a <span class="inline2">with</span> statement and inside it <span class="inline3_func"><span data-field="title" data-format="default">script_execute</span></span> is called twice: once with <span class="inline2">StructA</span> and once with <span class="inline2">StructB</span>. After the two calls to <span class="inline3_func"><span data-field="title" data-format="default">script_execute</span></span>, <span class="inline2">the_struct</span> has the variables of <span class="inline2">StructA</span> and <span class="inline2">StructB</span> and is an instance of <span class="inline2">StructB</span>.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a data-xref="{title}" href="Scripts.htm">Scripts</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="script_execute_ext.htm">script_execute_ext</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2024 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+script_execute
+-->
+  <!-- TAGS
+script_execute
+-->
+</body>
+</html>

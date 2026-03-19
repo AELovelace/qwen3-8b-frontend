@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>view_visible</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Reference page for view_visible" />
+  <meta name="rh-index-keywords" content="view_visible" />
+  <meta name="search-keywords" content="view_visible" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">view_visible</span></h1>
+  <p>This variable can be used to find out if a particular viewport is currently visible or not. You can also set this variable to effectively turn &quot;on&quot; or &quot;off&quot; a view by setting the value to <span class="inline2">true</span> (visible) or <span class="inline2">false</span> (invisible). Note that even if you have a viewport set to visible, if viewports are not enabled (using the built-in variable <span class="inline2"><a data-xref="{title}" href="view_enabled.htm">view_enabled</a></span> or enabling them in <a data-xref="{title}" href="../../../../The_Asset_Editors/Rooms.htm">The Room Editor</a>) then they will not be drawn to the screen.</p>
+  <div data-conref="../../../../assets/snippets/GML_Not_real_array.hts"> </div>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">view_visible</span>[0 ... 7]</p>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Bool"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Boolean</a></span> (true: enabled, false: disabled)</p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">if (!view_visible[0])<br />
+    {<br />
+        view_visible[0] = true;<br />
+    }</p>
+  <p>The above code checks to see if view[0] is visible or not and if it is not, it then sets it to be visible.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a data-xref="{title}" href="Cameras_And_View_Ports.htm">Cameras And Viewports</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="view_xport.htm">view_xport</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+view_visible
+-->
+  <!-- TAGS
+view_visible
+-->
+</body>
+</html>

@@ -7,10 +7,14 @@ A lightweight local chat application with:
 - Ollama chat streaming (SSE)
 - SQLite conversation memory with FTS5 retrieval
 - Optional Brave web search integration
+- Invite-only authentication with admin-managed users
 
 ## Features
 
 - Multi-conversation chat UI (create, list, delete)
+- Login and invite-token signup
+- Admin panel for creating/deleting users and generating invite tokens
+- Per-user conversation isolation
 - Streaming assistant responses with separate reasoning/thinking display
 - Optional web-search loop using `<search>...</search>` tags from the model
 - Long-term memory retrieval from older conversations when active context is truncated
@@ -88,6 +92,22 @@ The backend resolves keys in this order:
 1. `BRAVE_API_KEY` environment variable
 2. `config.json` value
 
+### Authentication
+
+Set these values in `.env` before first run:
+
+```bash
+JWT_SECRET=replace-with-a-long-random-secret
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace-with-a-strong-password
+```
+
+Notes:
+
+- On first startup, if no users exist, the backend creates the bootstrap admin from env vars.
+- Signup is invite-only. Admins can generate invite tokens from the UI.
+- All conversation and message APIs are scoped to the authenticated user.
+
 ## API Overview
 
 ### UI and conversation management
@@ -98,6 +118,18 @@ The backend resolves keys in this order:
 - `PATCH /api/conversations/{conv_id}` - rename conversation
 - `DELETE /api/conversations/{conv_id}` - delete conversation
 - `GET /api/conversations/{conv_id}/messages` - fetch ordered message history
+
+All routes above require a bearer token.
+
+### Authentication and admin
+
+- `POST /api/auth/login` - login with username/password
+- `POST /api/auth/signup` - create account with username/password/invite token
+- `GET /api/auth/me` - return current authenticated user
+- `GET /api/admin/users` - list users (admin only)
+- `POST /api/admin/users` - create user (admin only)
+- `POST /api/admin/invites` - generate invite token (admin only)
+- `DELETE /api/admin/users/{user_id}` - delete user (admin only)
 
 ### Settings
 

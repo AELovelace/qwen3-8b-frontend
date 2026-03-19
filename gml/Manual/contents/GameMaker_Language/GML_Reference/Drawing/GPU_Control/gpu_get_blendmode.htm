@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>gpu_get_blendmode</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Reference for the function gpu_get_blendmode" />
+  <meta name="rh-index-keywords" content="gpu_get_blendmode,bm_normal,bm_add,bm_subtract,bm_max" />
+  <meta name="search-keywords" content="gpu_get_blendmode,bm_normal,bm_add,bm_subtract,bm_max" />
+  <meta name="is_pure" content="true" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">gpu_get_blendmode</span></h1>
+  <p>This function can be used to retrieve the current blend mode being used for drawing. The returned value will be one of the following constants (the default value is <span class="inline">bm_normal</span>):</p>
+  <div data-conref="../../../../assets/snippets/Table_Gpu_blend_modes.hts"> </div>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">gpu_get_blendmode</span>()</p>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Constant_Draw_Blend_Mode"><a href="gpu_get_blendmode.htm" target="_blank">Blend Mode Constant</a></span> (see above for constants)</p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">if (gpu_get_blendmode() != bm_normal)<br />
+    {<br />
+        gpu_set_blendmode(bm_normal);<br />
+    }</p>
+  <p>The above code gets the current blend mode and if it is not <span class="inline">bm_normal</span> it is set to that constant.</p>
+  <p> </p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a href="GPU_Control.htm">GPU Control</a></div>
+        <div style="float:right">Next: <a href="gpu_get_blendmode_ext.htm">gpu_get_blendmode_ext</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+gpu_get_blendmode
+bm_normal
+bm_add
+bm_subtract
+bm_max
+-->
+  <!-- TAGS
+gpu_get_blendmode
+-->
+</body>
+</html>

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>Instance Keywords</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../assets/css/default.css" type="text/css" />
+  <script src="../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Page outlining the different instance &quot;keywords&quot;" />
+  <meta name="rh-index-keywords" content="Instance Keywords,noone,self,other,all" />
+  <meta name="search-keywords" content="self,all,noone,other,instance keywords" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">Instance Keywords</span></h1>
+  <p>To make certain things easier in <span data-keyref="GameMaker Name">GameMaker</span>, you can use one of several <b>instance keywords</b> in your code (whether <span data-keyref="GML_Code">GML Code</span> or <span data-keyref="GML_Visual">GML Visual</span>). These keywords are used to identify instances and structs.</p>
+  <ul class="colour">
+    <li><a data-xref="{title}" href="Instance Keywords/self.htm">self</a></li>
+    <li><a data-xref="{title}" href="Instance Keywords/other.htm">other</a></li>
+    <li><a data-xref="{title}" href="Instance Keywords/all.htm">all</a></li>
+    <li><a data-xref="{title}" href="Instance Keywords/noone.htm">noone</a></li>
+  </ul>
+  <h2 id="h">Legacy Values</h2>
+  <p>These variables have historically stored negative integer values which helps <span data-keyref="GameMaker Name">GameMaker</span> identify which keyword is being used. This is referenced in the following table:</p>
+  <table style="width: 616.5px;">
+    <colgroup>
+      <col />
+      <col />
+    </colgroup>
+    <tbody>
+      <tr>
+        <th style="">Variable</th>
+        <th>Value</th>
+      </tr>
+      <tr>
+        <td style=""><strong>self</strong></td>
+        <td>-1</td>
+      </tr>
+      <tr>
+        <td style=""><strong>other</strong></td>
+        <td>-2</td>
+      </tr>
+      <tr>
+        <td style=""><strong>all</strong></td>
+        <td>-3</td>
+      </tr>
+      <tr>
+        <td style=""><strong>noone</strong></td>
+        <td>-4</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>Due to compatibility reasons, these variables still refer to these values before the actual struct or instance it refers to is resolved. These values may appear in some cases, e.g. converting <span class="inline2">self</span> into a <a data-xref="{title}" href="../GML_Reference/Strings/string.htm">string</a> will result in <span class="inline2">&quot;-1&quot;</span> and inversely, using <span class="inline2">-1</span> in places where a scope is expected will refer to <span class="inline2">self</span>.</p>
+  <p>This can be seen in a <span class="inline3_func"><a data-xref="{title}" href="Language_Features/with.htm">with</a></span> block, where if you pass <span class="inline2">-1</span> the block is executed on <span class="inline2">self</span>. This may be unintentional when a <a href="Data_Types.htm">Handle</a> is passed with a value of <span class="inline2">-1</span>, where the expectation would be the <span class="inline3_func"><a data-xref="{title}" href="Language_Features/with.htm">with</a></span> block not executing however it executes on <span class="inline2">self</span> due to this legacy behaviour.</p>
+  <p class="note"><span data-conref="../../assets/snippets/Tag_important.hts"> </span> You <strong>should not</strong> use the numeric values of these keywords directly, always reference each keyword by its name.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a href="GML_Overview.htm">GML Overview</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="Evaluation_Order.htm">Evaluation Order</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+Instance Keywords
+-->
+  <!-- TAGS
+instance_keywords
+-->
+</body>
+</html>

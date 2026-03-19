@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>animcurve_get_channel</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Page explaining the function animcurve_get_channel" />
+  <meta name="rh-index-keywords" content="animcurve_get_channel" />
+  <meta name="search-keywords" content="animcurve_get_channel,animcurvetype_linear,animcurvetype_catmullrom" />
+  <meta name="is_pure" content="true" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">animcurve_get_channel</span></h1>
+  <p>This function returns a <a href="../../../GML_Overview/Structs.htm">struct</a> containing the channel data for the channel specified in an animation curve asset or struct (as returned by <span class="inline3_func"><a data-xref="{title}" href="animcurve_get.htm">animcurve_get</a></span>).</p>
+  <p>You supply the animation curve ID or struct as well as the channel name or index, and the function will return a struct with the following format:</p>
+  <div data-conref="../../../../assets/snippets/Animcurve_Channel_Struct.hts"> </div>
+  <p>The first required argument is the Animation Curve as it was defined in <a data-xref="{title}" href="../../../../Introduction/The_Asset_Browser.htm">The Asset Browser</a>, or the struct pointer as returned by the function <span class="inline3_func"><a data-xref="{title}" href="animcurve_create.htm">animcurve_create</a></span>.</p>
+  <p>The second required argument is a string that refers to the channel as it was defined in the Animation Curve asset, or you can supply an index value, which is from 0 to <i>n-1</i>, where <i>n-1</i> is the last channel in the curve asset (e.g.: if an animation curve has 4 channels, they will be indexed from 0 to 3).</p>
+  <p>Note that passing an index value will require less processing than passing in a channel name. If the function fails (i.e.: no channel exists with the given name or index) then you will get an error.</p>
+  <h3>&#39;points&#39; Array</h3>
+  <p>The <span class="inline2">points</span> member of the returned struct contains an array, which contains all of the channel&#39;s points as structs.</p>
+  <p>One point struct has the following variables:</p>
+  <div data-conref="../../../../assets/snippets/Animcurve_Point_Struct.hts"> </div>
+  <p>The <span class="inline2">points</span> member only allows you to get and set the array variable. You cannot run <a data-xref="{title}" href="../../Variable_Functions/Array_Functions.htm">Array Functions</a> on the <span class="inline2">points</span> array to modify it.</p>
+  <p>To modify the <span class="inline2">points</span> array, store it in a variable, which will create a copy. Then modify that copy with the array functions, and apply that copy back to the <span class="inline2">points</span> member in the struct.</p>
+  <p class="code">var _points_copy = channel_struct.points;<br />
+    <br />
+    array_delete(_points_copy, 0, 1);<br />
+    <br />
+    channel_struct.points = _points_copy;
+  </p>
+  <p> </p>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">animcurve_get_channel</span>(curve_struct_or_id, channel_name_or_index)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>curve_struct_or_id</td>
+        <td><span data-keyref="Type_Struct_AnimCurve"><a href="animcurve_get.htm" target="_blank">Animation Curve Struct</a></span> or <span data-keyref="Type_Asset_Animation_Curve"><a href="../../../../The_Asset_Editors/Animation_Curves.htm" target="_blank">Animation Curve Asset</a></span></td>
+        <td>The ID or struct pointer of the animation curve to target</td>
+      </tr>
+      <tr>
+        <td>channel_name_or_index</td>
+        <td><span data-keyref="Type_String"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">String</a></span> or <span data-keyref="Type_Real"><a href="../../../GML_Overview/Data_Types.htm" target="_blank">Real</a></span></td>
+        <td>The channel name (a string) or the channel index (an integer)</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Struct_AnimCurve_Channel"><a href="animcurve_get_channel.htm" target="_blank">Animation Curve Channel Struct</a></span></p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">var _channel_data = animcurve_get_channel(ac_ButtonTween, 0);<br />
+    var _points = _channel_data.points;<br />
+    for (var i = 0; i &lt; array_length(_points); ++i)<br />
+    {<br />
+        _points[i].value += 1;<br />
+    }</p>
+  <p>The above code retrieves the channel struct for channel 0 in the curve asset <span class="inline2">ac_ButtonTween</span>, then loops through the points on the channel curve and adds one to their value.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a data-xref="{title}" href="Animation_Curves.htm">Back</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="animcurve_channel_evaluate.htm">Next</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+animcurve_get_channel
+-->
+  <!-- TAGS
+animcurve_get_channel
+-->
+</body>
+</html>

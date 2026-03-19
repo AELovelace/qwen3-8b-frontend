@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>sequence_instance_override_object</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Page outlining function sequence_instance_override_object" />
+  <meta name="rh-index-keywords" content="sequence_instance_override_object" />
+  <meta name="search-keywords" content="sequence_instance_override_object" />
+  <meta name="is_pure" content="true" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">sequence_instance_override_object</span></h1>
+  <p>With this function you can override (replace) all instances of an object used in a sequence with another object or only the first instance of the given object with a given instance.</p>
+  <p>You supply the sequence instance struct (as returned when the sequence instance was created in the room or by using one of the room layer functions - see <a data-xref="{title}" href="../Rooms/Sequence_Layers/Sequence_Layers.htm">Sequence Elements</a>) as well as the object index for the object that you want to override (as defined in the Asset Browser). Finally you give an object index or an instance ID to use as the object (or single instance) that is going to override the sequence. Note that this can only be done on sequence instances (not sequence objects) and must be done before the sequence starts to play, otherwise it won&#39;t work.</p>
+  <p class="note"><span data-conref="../../../../assets/snippets/Tag_important.hts"> </span> If you use this function with a sequence instance that has multiple object tracks of the same object asset and you provide an instance ID as the third argument then only the first instance of the object is replaced with the given instance. The other object tracks will not get an instance.</p>
+  <p class="note"><span data-conref="../../../../assets/snippets/Tag_important.hts"> </span> If you provide an existing instance ID, the instance will stay on the layer it is already on, however its drawing will be taken over by the Sequence and it will be drawn at the Sequence&#39;s depth. To disable this and return the instance&#39;s drawing control back to it, set the instance&#39;s <span class="inline2"><a data-xref="{title}" href="drawn_by_sequence.htm">drawn_by_sequence</a></span> variable to <span class="inline2">false</span>.</p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">sequence_instance_override_object</span>(sequence_instance_struct, object_id, instance_or_object_id)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>sequence_instance_struct</td>
+        <td><span data-keyref="Type_Struct_Sequence_Instance"><a href="Sequence_Structs/The_Sequence_Instance_Struct.htm" target="_blank">Sequence Instance Struct</a></span></td>
+        <td>The sequence instance struct to modify</td>
+      </tr>
+      <tr>
+        <td>object_id</td>
+        <td><span data-keyref="Type_Asset_Object"><a href="../../../../The_Asset_Editors/Objects.htm" target="_blank">Object Asset</a></span></td>
+        <td>The object index of the object within the sequence to override</td>
+      </tr>
+      <tr>
+        <td>instance_or_object_id</td>
+        <td><span data-keyref="Type_Asset_Object"><a href="../../../../The_Asset_Editors/Objects.htm" target="_blank">Object Asset</a></span> or <span data-keyref="Type_ID_Instance"><a href="../Instances/Instance_Variables/id.htm" target="_blank">Object Instance</a></span></td>
+        <td>The object index or instance ID to use to override the sequence objects</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Void">N/A</span></p>
+  <p> </p>
+  <h4>Example 1: Replace an object ID with another object ID</h4>
+  <p class="code">var _seq = layer_sequence_create(&quot;Background&quot;, 0, 0, seq_animated_background);<br />
+    var _seq_inst = layer_sequence_get_instance(_seq);<br />
+    <span data-field="title" data-format="default">sequence_instance_override_object</span>(_seq_inst, obj_trees_winter, obj_trees_summer);
+  </p>
+  <p>The above code creates a new sequence instance on the given layer and then modifies it so that all instances of the object <span class="inline2">obj_trees_winter</span> are replaced by instances of the object <span class="inline2">obj_trees_summer</span>.</p>
+  <h4>Example 2: Replace the first instance of an object ID with an instance ID</h4>
+  <p class="code">var _seq = layer_sequence_create(&quot;Background&quot;, 0, 0, seq_animated_background);<br />
+    var _seq_inst = layer_sequence_get_instance(_seq);<br />
+    var _inst = instance_find(obj_tree_christmas, 0);<br />
+    if (_inst != noone)<br />
+    {<br />
+        <span data-field="title" data-format="default">sequence_instance_override_object</span>(_seq_inst, obj_trees_winter, _inst);<br />
+    }</p>
+  <p>The above code creates a new sequence instance on the <span class="inline2">&quot;Background&quot;</span> layer. It then tries to find an instance of <span class="inline2">obj_tree_christmas</span> using <span class="inline3_func"><a data-xref="{title}" href="../Instances/instance_find.htm">instance_find</a></span>. If an instance of this object is found, that instance replaces the first instance of object <span class="inline2">obj_trees_winter</span> in the sequence by this instance using <span class="inline3_func"><span data-field="title" data-format="default">sequence_instance_override_object</span></span>. All other object tracks with <span class="inline2">obj_trees_winter</span> as the object will <i>not</i> have an instance.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a data-xref="{title}" href="Sequences.htm">Sequences</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="in_sequence.htm">in_sequence</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+sequence_instance_override_object
+-->
+  <!-- TAGS
+sequence_instance_override_object
+-->
+</body>
+</html>

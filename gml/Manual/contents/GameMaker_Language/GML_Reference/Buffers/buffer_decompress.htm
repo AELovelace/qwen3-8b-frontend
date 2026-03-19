@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>buffer_decompress</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../assets/css/default.css" type="text/css" />
+  <script src="../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Reference page for buffer_decompress" />
+  <meta name="rh-index-keywords" content="buffer_decompress" />
+  <meta name="search-keywords" content="buffer_decompress" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">buffer_decompress</span></h1>
+  <p>This function returns a new buffer with the decompressed data of a buffer that stores data using <a href="https://en.wikipedia.org/wiki/Zlib">zlib compression</a>.</p>
+  <p>You supply the buffer to decompress, and the function will return a new buffer that contains the uncompressed data. If the decompression failed (for example, you supplied a buffer that wasn&#39;t compressed) then the function will instead return an invalid handle (<span class="inline2">-1</span>).</p>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">buffer_decompress</span>(buffer)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>buffer</td>
+        <td><span data-keyref="Type_ID_Buffer"><a href="buffer_create.htm" target="_blank">Buffer</a></span></td>
+        <td>The index of the buffer to decompress.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_ID_Buffer"><a href="buffer_create.htm" target="_blank">Buffer</a></span> (or an invalid buffer handle -1 in case the buffer couldn&#39;t be decompressed)</p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">var _cmpBuff = buffer_load(&quot;Player_Save.sav&quot;);<br />
+    var _srcBuff = <span data-field="title" data-format="default">buffer_decompress</span>(_cmpBuff);<br />
+    global.DataString = buffer_read(_srcBuff, buffer_string);</p>
+  <p>The above code first loads a saved buffer, then decompresses it and finally reads the string data from the decompressed buffer into a global variable.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a href="Buffers.htm">Buffers</a></div>
+        <div style="float:right">Next: <a href="buffer_async_group_begin.htm">buffer_async_group_begin</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+buffer_decompress
+-->
+  <!-- TAGS
+buffer_decompress
+-->
+</body>
+</html>

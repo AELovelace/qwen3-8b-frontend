@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <title>draw_primitive_begin</title>
+  <meta name="generator" content="Adobe RoboHelp 2022" />
+  <link rel="stylesheet" href="../../../../assets/css/default.css" type="text/css" />
+  <script src="../../../../assets/scripts/main_script.js" type="module"></script>
+  <meta name="rh-authors" content="Mark Alexander" />
+  <meta name="topic-comment" content="Reference for draw_primitive_begin" />
+  <meta name="rh-index-keywords" content="draw_primitive_begin,pr_pointlist,pr_linelist,pr_linestrip,pr_trianglelist,pr_trianglefan,pr_trianglestrip" />
+  <meta name="search-keywords" content="draw_primitive_begin,pr_pointlist,pr_linelist,pr_linestrip,pr_trianglelist,pr_trianglestrip,pr_trianglefan" />
+</head>
+<body>
+  <!--<div class="body-scroll" style="top: 150px;">-->
+  <h1><span data-field="title" data-format="default">draw_primitive_begin</span></h1>
+  <p>This function starts drawing a primitive of the given type (this must be called before you can define any primitives).</p>
+  <p>There are 6 types of primitives you can define as the following constants:</p>
+  <div data-conref="../../../../assets/snippets/Primitive_Type_Constants.hts"> </div>
+  <p>The following image illustrates basically how these should look and also the order in which you should define the vertices:</p>
+  <p><img alt="The different primitive types" class="center" height="436" src="../../../../assets/Images/Scripting_Reference/GML/Reference/Drawing/primitive_types.png" width="573" /></p>
+  <p class="note"><span data-conref="../../../../assets/snippets/Tag_note.hts"> </span> On some platforms (Windows, Xbox) the <span class="inline2">pr_trianglefan</span> type is not natively supported and so <span data-keyref="GameMaker Name">GameMaker</span> does a conversion when the game is compiled to make them work. This means that on those platforms the <span class="inline2">pr_trianglefan</span> type will be much slower to use than the others.</p>
+  <div data-conref="../../../../assets/snippets/Note_Primitives_Enable_WebGL_On_HTML5.hts"> </div>
+  <p> </p>
+  <h4>Syntax:</h4>
+  <p class="code"><span data-field="title" data-format="default">draw_primitive_begin</span>(kind)</p>
+  <table>
+    <tbody>
+      <tr>
+        <th>Argument</th>
+        <th>Type</th>
+        <th>Description</th>
+      </tr>
+      <tr>
+        <td>kind</td>
+        <td><span data-keyref="Type_Constant_Draw_Primitive_Type"><a href="draw_primitive_begin.htm" target="_blank">Primitive Type Constant</a></span></td>
+        <td>The kind of primitive you are going to draw</td>
+      </tr>
+    </tbody>
+  </table>
+  <p> </p>
+  <h4>Returns:</h4>
+  <p class="code"><span data-keyref="Type_Void">N/A</span></p>
+  <p> </p>
+  <h4>Example:</h4>
+  <p class="code">var _steps = 20;<br />
+    var _xx = 50;<br />
+    var _yy = 50;<br />
+    var _radius = 30;<br />
+    draw_primitive_begin(pr_trianglefan);<br />
+    draw_vertex(_xx, _yy);<br />
+    for(var i = 0; i &lt;= _steps; ++i)<br />
+    {<br />
+        draw_vertex(_xx + lengthdir_x(_radius, 270 * i / _steps), _yy + lengthdir_y(_radius, 270 * i / _steps));<br />
+    }<br />
+    draw_primitive_end();</p>
+  <p>The above code will draw three quarters of a circle made from primitives.</p>
+  <p> </p>
+  <p> </p>
+  <div class="footer">
+    <div class="buttons">
+      <div class="clear">
+        <div style="float:left">Back: <a data-xref="{title}" href="Primitives_And_Vertex_Formats.htm">Primitives And Vertex Formats</a></div>
+        <div style="float:right">Next: <a data-xref="{title}" href="draw_primitive_begin_texture.htm">draw_primitive_begin_texture</a></div>
+      </div>
+    </div>
+    <h5><span data-keyref="Copyright Notice">© Copyright YoYo Games Ltd. 2025 All Rights Reserved</span></h5>
+  </div>
+  <!-- KEYWORDS
+draw_primitive_begin
+pr_pointlist
+pr_linelist
+pr_linestrip
+pr_trianglelist
+pr_trianglestrip
+pr_trianglefan
+-->
+  <!-- TAGS
+draw_primitive_begin
+-->
+</body>
+</html>
