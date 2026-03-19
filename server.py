@@ -32,6 +32,7 @@ from pydantic import BaseModel
 OLLAMA_URL        = "http://localhost:11434/api/chat"
 OLLAMA_HEALTH_URL = "http://127.0.0.1:11434/api/tags"
 BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
+DEFAULT_MODEL     = "huihui_ai/qwen3-abliterated:8b"
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
 CONFIG_PATH       = Path(__file__).parent / "config.json"
@@ -208,7 +209,7 @@ class ConversationRename(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
-    model: str = "huihui_ai/qwen3-abliterated:8b"
+    model: str = DEFAULT_MODEL
     think: bool = True
     use_search: bool = True
 
@@ -227,6 +228,16 @@ def estimate_tokens(text: str) -> int:
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def normalize_model_name(model: str) -> str:
+    """Normalise known model aliases to explicit Ollama tags."""
+    cleaned = (model or "").strip()
+    if not cleaned:
+        return DEFAULT_MODEL
+    if cleaned == "huihui_ai/qwen3-abliterated":
+        return DEFAULT_MODEL
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -560,6 +571,8 @@ async def chat(req: ChatRequest):
         await db.close()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    requested_model = normalize_model_name(req.model)
+
     async def event_stream() -> AsyncGenerator[str, None]:
         all_thinking = ""   # accumulated across all iterations
         final_content = ""  # the last iteration's clean answer
@@ -567,7 +580,7 @@ async def chat(req: ChatRequest):
         working_msgs = list(ollama_messages)
 
         def _payload(msgs: list[dict]) -> dict:
-            return {"model": req.model, "messages": msgs, "think": req.think, "stream": True}
+            return {"model": requested_model, "messages": msgs, "think": req.think, "stream": True}
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -684,4 +697,4 @@ async def chat(req: ChatRequest):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("server:app", host="0.0.0.0", port=42069, reload=True)
