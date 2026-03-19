@@ -9,6 +9,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,7 @@ from pydantic import BaseModel
 # Config
 # ---------------------------------------------------------------------------
 OLLAMA_URL        = "http://localhost:11434/api/chat"
+OLLAMA_HEALTH_URL = "http://127.0.0.1:11434/api/tags"
 BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
@@ -53,6 +56,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Ollama Qwen3 Chat")
+_ollama_start_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # Database
@@ -112,8 +116,73 @@ async def get_db() -> aiosqlite.Connection:
     return db
 
 
+async def is_ollama_running(timeout_seconds: float = 1.5) -> bool:
+    """Return True when Ollama responds on port 11434."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(OLLAMA_HEALTH_URL) as resp:
+                return resp.status == 200
+    except Exception:
+        return False
+
+
+def start_ollama_service() -> bool:
+    """Try to launch `ollama serve` in a detached process."""
+    ollama_bin = shutil.which("ollama")
+    if not ollama_bin:
+        log.warning("Ollama binary not found in PATH; cannot auto-start service.")
+        return False
+
+    popen_kwargs = {
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen([ollama_bin, "serve"], **popen_kwargs)
+        log.info("Attempted to start Ollama service: %s serve", ollama_bin)
+        return True
+    except Exception as exc:
+        log.warning("Failed to start Ollama automatically: %s", exc)
+        return False
+
+
+async def ensure_ollama_running(wait_seconds: int = 8) -> bool:
+    """Ensure Ollama is reachable; auto-start it when missing."""
+    if await is_ollama_running():
+        return True
+
+    async with _ollama_start_lock:
+        if await is_ollama_running():
+            return True
+
+        log.warning("No service detected on port 11434. Attempting to start Ollama.")
+        if not start_ollama_service():
+            return False
+
+        for _ in range(wait_seconds):
+            await asyncio.sleep(1)
+            if await is_ollama_running():
+                log.info("Ollama became available on port 11434.")
+                return True
+
+        log.warning("Ollama did not become ready after %s seconds.", wait_seconds)
+        return False
+
+
 @app.on_event("startup")
 async def startup():
+    if not await ensure_ollama_running():
+        log.warning("Continuing startup without Ollama; /api/chat will retry auto-start.")
+
     db = await get_db()
     try:
         for stmt in _DDL_STATEMENTS:
@@ -139,7 +208,7 @@ class ConversationRename(BaseModel):
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
-    model: str = "huihui_ai/qwen3-abliterated"
+    model: str = "huihui_ai/qwen3-abliterated:8b"
     think: bool = True
     use_search: bool = True
 
@@ -441,6 +510,12 @@ async def update_settings(body: SettingsUpdate):
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
+    if not await ensure_ollama_running(wait_seconds=6):
+        raise HTTPException(
+            status_code=503,
+            detail="Ollama is not available on port 11434 and auto-start failed. Start it with `ollama serve`.",
+        )
+
     db = await get_db()
     try:
         cursor = await db.execute("SELECT id FROM conversations WHERE id=?", (req.conversation_id,))
