@@ -13,6 +13,8 @@ import secrets
 import shutil
 import subprocess
 import uuid
+from collections import Counter
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator
@@ -30,6 +32,15 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
+try:
+    import chromadb
+    import chromadb.config
+    from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+    CHROMADB_AVAILABLE = True
+except ImportError:
+    CHROMADB_AVAILABLE = False
+    log = logging.getLogger(__name__)  # early reference for error handling
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -40,15 +51,20 @@ DEFAULT_MODEL     = "huihui_ai/qwen3-abliterated:8b"
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
 CONFIG_PATH       = Path(__file__).parent / "config.json"
+GML_DOCS_ROOT     = Path(__file__).parent / "gml"
+GML_EMBEDDINGS_DB = Path(__file__).parent / "gml_embeddings"
 TOKEN_CAP              = 20_000  # max tokens kept in active context
 FTS_RESULT_LIMIT       = 3       # past-memory snippets to inject when truncated
 TOKEN_ESTIMATE_DIVISOR = 4       # chars / 4 ≈ tokens
 MAX_SEARCH_ITERATIONS  = 3       # max Brave searches per response
 BRAVE_SEARCH_COUNT     = 5       # results to fetch per query
+GML_RESULT_LIMIT       = 4       # local GML manual snippets to inject
+GML_CHUNK_CHAR_LIMIT   = 1_400   # target chunk size for manual retrieval
 JWT_ALGORITHM          = "HS256"
 ACCESS_TOKEN_HOURS     = 24
 
 SEARCH_TAG_RE = re.compile(r'<search>(.*?)</search>', re.IGNORECASE | re.DOTALL)
+GML_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 
 SEARCH_SYSTEM_PROMPT = (
     "You have access to a live web search tool. "
@@ -59,13 +75,72 @@ SEARCH_SYSTEM_PROMPT = (
     "You may search up to 3 times per response. Only search when genuinely needed."
 )
 
+GML_SYSTEM_PROMPT = (
+    "You are assisting with GameMaker programming in GML. "
+    "Prefer accurate GameMaker terminology, explain engine-specific behavior clearly, "
+    "and provide practical code examples when useful. "
+    "If local GameMaker manual excerpts are provided, use them as your primary source. "
+    "If the excerpts do not fully answer the question, say what is missing instead of inventing APIs or behavior."
+)
+
+FILE_TOOLS_SYSTEM_PROMPT = (
+    "You have access to local file operations tools for reading, writing, and searching files. "
+    "The workspace is sandboxed to a specific root directory configured by your admin. "
+    "You can use these tools to analyze code, make edits, and validate your work. "
+    "Command execution (execute_command tool) is always gated: you will receive a permission prompt before any command runs. "
+    "Provide complete, correct tool calls; the user will handle permission dialogs. "
+    "If you show a tool call in assistant-visible text, always surround it with a markdown fenced code block."
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="Ollama Qwen3 Chat")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not await ensure_ollama_running():
+        log.warning("Continuing startup without Ollama; /api/chat will retry auto-start.")
+
+    db = await get_db()
+    try:
+        for stmt in _DDL_STATEMENTS:
+            await db.execute(stmt.strip())
+        await db.commit()
+        await ensure_conversations_user_column(db)
+        await ensure_user_tools_columns(db)
+
+        if not get_jwt_secret():
+            raise RuntimeError("JWT_SECRET is required in environment before startup")
+
+        admin = await ensure_bootstrap_admin(db)
+        await backfill_legacy_conversations(db, admin["id"])
+    finally:
+        await db.close()
+
+    await ensure_gml_index_loaded(force=True)
+    app.state.embeddings_ready = False
+    app.state.embeddings_building = CHROMADB_AVAILABLE
+    if CHROMADB_AVAILABLE:
+        get_or_init_embedding_model()
+        get_or_init_chroma_client()
+        asyncio.create_task(_build_embeddings_background())
+    log.info("Database initialised at %s", DB_PATH)
+    yield
+
+
+app = FastAPI(title="Ollama Qwen3 Chat", lifespan=lifespan)
 _ollama_start_lock = asyncio.Lock()
+_gml_index_lock = asyncio.Lock()
 _auth_scheme = HTTPBearer(auto_error=False)
 _pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+# Command approval state: {cmd_id: (event, user_id, result, command)}
+_pending_approvals: dict[str, tuple[asyncio.Event, str, bool, str]] = {}
+_pending_approvals_lock = asyncio.Lock()
+
+# Embeddings model (lazy-loaded)
+_embedding_model: SentenceTransformerEmbeddingFunction | None = None
+_chroma_client = None  # chromadb.PersistentClient, typed loosely to avoid import quirks
 
 # ---------------------------------------------------------------------------
 # Database
@@ -75,12 +150,14 @@ _DDL_STATEMENTS = [
     "PRAGMA journal_mode=WAL",
     """
     CREATE TABLE IF NOT EXISTS users (
-        id            TEXT PRIMARY KEY,
-        username      TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        role          TEXT NOT NULL DEFAULT 'user',
-        is_active     INTEGER NOT NULL DEFAULT 1,
-        created_at    TEXT NOT NULL
+        id                  TEXT PRIMARY KEY,
+        username            TEXT NOT NULL UNIQUE,
+        password_hash       TEXT NOT NULL,
+        role                TEXT NOT NULL DEFAULT 'user',
+        is_active           INTEGER NOT NULL DEFAULT 1,
+        file_tools_enabled  INTEGER NOT NULL DEFAULT 0,
+        workspace_root      TEXT NOT NULL DEFAULT '',
+        created_at          TEXT NOT NULL
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
@@ -213,6 +290,18 @@ async def ensure_conversations_user_column(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+async def ensure_user_tools_columns(db: aiosqlite.Connection) -> None:
+    """Migrate users table to add file tools columns if missing."""
+    cursor = await db.execute("PRAGMA table_info(users)")
+    rows = await cursor.fetchall()
+    cols = {row["name"] for row in rows}
+    if "file_tools_enabled" not in cols:
+        await db.execute("ALTER TABLE users ADD COLUMN file_tools_enabled INTEGER NOT NULL DEFAULT 0")
+    if "workspace_root" not in cols:
+        await db.execute("ALTER TABLE users ADD COLUMN workspace_root TEXT NOT NULL DEFAULT ''")
+    await db.commit()
+
+
 async def ensure_bootstrap_admin(db: aiosqlite.Connection) -> dict:
     raw_username = os.environ.get("ADMIN_USERNAME", "").strip().lower()
     raw_password = os.environ.get("ADMIN_PASSWORD", "")
@@ -322,7 +411,7 @@ async def get_current_user(
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, created_at FROM users WHERE id=?",
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, created_at FROM users WHERE id=?",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -401,26 +490,7 @@ async def ensure_ollama_running(wait_seconds: int = 8) -> bool:
         return False
 
 
-@app.on_event("startup")
-async def startup():
-    if not await ensure_ollama_running():
-        log.warning("Continuing startup without Ollama; /api/chat will retry auto-start.")
 
-    db = await get_db()
-    try:
-        for stmt in _DDL_STATEMENTS:
-            await db.execute(stmt.strip())
-        await db.commit()
-        await ensure_conversations_user_column(db)
-
-        if not get_jwt_secret():
-            raise RuntimeError("JWT_SECRET is required in environment before startup")
-
-        admin = await ensure_bootstrap_admin(db)
-        await backfill_legacy_conversations(db, admin["id"])
-    finally:
-        await db.close()
-    log.info("Database initialised at %s", DB_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -441,6 +511,8 @@ class ChatRequest(BaseModel):
     model: str = DEFAULT_MODEL
     think: bool = True
     use_search: bool = True
+    use_gml_docs: bool = True
+    use_file_tools: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -468,6 +540,11 @@ class AdminCreateInviteRequest(BaseModel):
     expires_in_days: int = 7
 
 
+class CommandApprovalRequest(BaseModel):
+    cmd_id: str
+    approved: bool
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -488,6 +565,332 @@ def normalize_model_name(model: str) -> str:
     if cleaned == "huihui_ai/qwen3-abliterated":
         return DEFAULT_MODEL
     return cleaned
+
+
+def tokenize_search_text(text: str) -> list[str]:
+    return [token.lower() for token in GML_TOKEN_RE.findall(text or "") if len(token) >= 2]
+
+
+def split_gml_markdown(content: str) -> list[tuple[str, str]]:
+    lines = content.splitlines()
+    sections: list[tuple[str, str]] = []
+    current_heading = "Document Overview"
+    current_lines: list[str] = []
+
+    def flush_section() -> None:
+        nonlocal current_lines
+        text = "\n".join(current_lines).strip()
+        if text:
+            sections.append((current_heading, text))
+        current_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            flush_section()
+            current_heading = stripped.lstrip("#").strip() or "Document Overview"
+            current_lines.append(line)
+            continue
+        current_lines.append(line)
+
+    flush_section()
+    if sections:
+        return sections
+
+    fallback = content.strip()
+    return [("Document Overview", fallback)] if fallback else []
+
+
+def chunk_gml_section(heading: str, content: str, limit: int = GML_CHUNK_CHAR_LIMIT) -> list[str]:
+    compact = content.strip()
+    if not compact:
+        return []
+
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", compact) if part.strip()]
+    if not paragraphs:
+        paragraphs = [compact]
+
+    chunks: list[str] = []
+    current = f"Section: {heading}\n\n"
+    for paragraph in paragraphs:
+        candidate = current + paragraph + "\n\n"
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+
+        if current.strip() != f"Section: {heading}":
+            chunks.append(current.strip())
+            current = f"Section: {heading}\n\n"
+
+        if len(paragraph) <= limit:
+            current += paragraph + "\n\n"
+            continue
+
+        start = 0
+        while start < len(paragraph):
+            slice_end = min(start + limit, len(paragraph))
+            snippet = paragraph[start:slice_end].strip()
+            if snippet:
+                chunks.append(f"Section: {heading}\n\n{snippet}")
+            start = slice_end
+
+    if current.strip() != f"Section: {heading}":
+        chunks.append(current.strip())
+    return chunks
+
+
+def build_gml_index(root: Path) -> dict:
+    stats = {
+        "enabled": root.exists(),
+        "root": str(root),
+        "file_count": 0,
+        "chunk_count": 0,
+        "indexed_at": now_iso(),
+        "chunks": [],
+        "error": "",
+    }
+    if not root.exists():
+        stats["error"] = f"GML docs folder not found: {root}"
+        return stats
+
+    chunks: list[dict] = []
+    for md_path in sorted(root.rglob("*.md")):
+        try:
+            raw_text = md_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            log.warning("Failed to read GML doc %s: %s", md_path, exc)
+            continue
+
+        rel_path = md_path.relative_to(root.parent).as_posix()
+        title = md_path.stem.replace("_", " ")
+        for heading, section_text in split_gml_markdown(raw_text):
+            for chunk_index, chunk_text in enumerate(chunk_gml_section(heading, section_text)):
+                searchable = f"{rel_path}\n{title}\n{heading}\n{chunk_text}"
+                chunks.append({
+                    "path": rel_path,
+                    "title": title,
+                    "heading": heading,
+                    "chunk_index": chunk_index,
+                    "content": chunk_text,
+                    "searchable": searchable.lower(),
+                    "tokens": Counter(tokenize_search_text(searchable)),
+                })
+
+        stats["file_count"] += 1
+
+    stats["chunk_count"] = len(chunks)
+    stats["chunks"] = chunks
+    return stats
+
+
+async def ensure_gml_index_loaded(force: bool = False) -> dict:
+    current_index = getattr(app.state, "gml_index", None)
+    if current_index is not None and not force:
+        return current_index
+
+    async with _gml_index_lock:
+        current_index = getattr(app.state, "gml_index", None)
+        if current_index is not None and not force:
+            return current_index
+
+        gml_index = build_gml_index(GML_DOCS_ROOT)
+        app.state.gml_index = gml_index
+        log.info(
+            "GML doc index ready: %d files, %d chunks",
+            gml_index.get("file_count", 0),
+            gml_index.get("chunk_count", 0),
+        )
+        if gml_index.get("error"):
+            log.warning("GML doc index warning: %s", gml_index["error"])
+        return gml_index
+
+
+def get_or_init_embedding_model() -> SentenceTransformerEmbeddingFunction | None:
+    global _embedding_model
+    if not CHROMADB_AVAILABLE:
+        return None
+    if _embedding_model is None:
+        try:
+            _embedding_model = SentenceTransformerEmbeddingFunction(
+                model_name="all-MiniLM-L6-v2"
+            )
+            log.info("Embedding model initialized: all-MiniLM-L6-v2")
+        except Exception as exc:
+            log.error("Failed to initialize embedding model: %s", exc)
+            return None
+    return _embedding_model
+
+
+def get_or_init_chroma_client():
+    global _chroma_client
+    if not CHROMADB_AVAILABLE:
+        return None
+    if _chroma_client is None:
+        try:
+            GML_EMBEDDINGS_DB.mkdir(parents=True, exist_ok=True)
+            _chroma_client = chromadb.PersistentClient(path=str(GML_EMBEDDINGS_DB))
+            log.info("Chroma persistent client initialized at %s", GML_EMBEDDINGS_DB)
+        except Exception as exc:
+            log.error("Failed to initialize Chroma client: %s", exc)
+            return None
+    return _chroma_client
+
+
+def _chromadb_build_sync(chunks: list[dict]) -> dict:
+    """Synchronous chromadb upsert — intended for thread-pool execution.
+
+    Skips the full rebuild when a persisted collection already contains the
+    exact same number of chunks (i.e. the GML docs haven't changed since the
+    last run).  Delete GML_EMBEDDINGS_DB to force a full rebuild.
+    """
+    embedding_fn = get_or_init_embedding_model()
+    client = get_or_init_chroma_client()
+    if not embedding_fn or not client:
+        return {
+            "enabled": False,
+            "error": "Failed to initialize embeddings or Chroma client",
+            "chunk_count": 0,
+        }
+    collection_name = "gml_docs"
+    try:
+        # Check if a valid cached collection already exists.
+        existing = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=embedding_fn,
+            metadata={"hnsw:space": "cosine"},
+        )
+        if existing.count() == len(chunks):
+            log.info(
+                "GML embeddings cache hit: %d chunks already indexed, skipping rebuild",
+                len(chunks),
+            )
+            return {"enabled": True, "chunk_count": len(chunks), "collection_name": collection_name}
+
+        # Count mismatch — docs changed, rebuild from scratch.
+        log.info(
+            "GML embeddings cache miss (%d stored vs %d current), rebuilding…",
+            existing.count(),
+            len(chunks),
+        )
+        client.delete_collection(name=collection_name)
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=embedding_fn,
+            metadata={"hnsw:space": "cosine"},
+        )
+        ids = [f"chunk_{i}" for i in range(len(chunks))]
+        documents = [c["content"] for c in chunks]
+        metadatas = [
+            {"path": c["path"], "heading": c["heading"], "chunk_index": str(c["chunk_index"])}
+            for c in chunks
+        ]
+        if ids:
+            batch_size = 5000
+            for i in range(0, len(ids), batch_size):
+                collection.upsert(
+                    ids=ids[i:i + batch_size],
+                    documents=documents[i:i + batch_size],
+                    metadatas=metadatas[i:i + batch_size],
+                )
+        log.info("Built GML embeddings collection: %d chunks indexed", len(ids))
+        return {"enabled": True, "chunk_count": len(ids), "collection_name": collection_name}
+    except Exception as exc:
+        log.error("Failed to build GML embeddings collection: %s", exc)
+        return {"enabled": False, "error": str(exc), "chunk_count": 0}
+
+
+async def _build_embeddings_background() -> None:
+    """Background task: builds Chroma embeddings without blocking the event loop."""
+    try:
+        gml_index = getattr(app.state, "gml_index", None)
+        if not gml_index or not gml_index.get("chunks"):
+            log.warning("GML embeddings: index not ready, skipping build")
+            app.state.embeddings_ready = False
+            return
+        result = await asyncio.to_thread(_chromadb_build_sync, gml_index["chunks"])
+        app.state.embeddings_ready = result.get("enabled", False)
+        if result.get("enabled"):
+            log.info("GML embeddings collection ready: %d chunks", result["chunk_count"])
+        else:
+            log.warning("GML embeddings not available: %s", result.get("error", "unknown"))
+    except Exception as exc:
+        log.error("GML embeddings background task failed: %s", exc)
+        app.state.embeddings_ready = False
+    finally:
+        app.state.embeddings_building = False
+
+
+async def build_gml_embeddings_collection() -> dict:
+    """Async wrapper used outside of the background startup task."""
+    if not CHROMADB_AVAILABLE:
+        return {
+            "enabled": False,
+            "error": "chromadb not available; install with: pip install chromadb sentence-transformers",
+            "chunk_count": 0,
+        }
+    gml_index = getattr(app.state, "gml_index", None)
+    if not gml_index or not gml_index.get("chunks"):
+        return {
+            "enabled": False,
+            "error": "GML index not found; cannot build embeddings",
+            "chunk_count": 0,
+        }
+    return await asyncio.to_thread(_chromadb_build_sync, gml_index["chunks"])
+
+
+def search_gml_docs(query: str, limit: int = GML_RESULT_LIMIT) -> list[dict]:
+    """Search GML docs using vector embeddings (semantic search)."""
+    if not CHROMADB_AVAILABLE:
+        log.warning("Chroma not available; cannot perform semantic search")
+        return []
+    
+    client = get_or_init_chroma_client()
+    if not client:
+        return []
+    
+    try:
+        collection = client.get_collection(name="gml_docs")
+    except Exception as exc:
+        log.warning("GML embeddings collection not found: %s. Falling back to empty results.", exc)
+        return []
+    
+    try:
+        results = collection.query(
+            query_texts=[query],
+            n_results=limit,
+        )
+        
+        selected = []
+        if results and results["ids"] and len(results["ids"]) > 0:
+            for i, doc_id in enumerate(results["ids"][0]):
+                if i < len(results["metadatas"][0]) and i < len(results["documents"][0]):
+                    metadata = results["metadatas"][0][i]
+                    document = results["documents"][0][i]
+                    distance = results["distances"][0][i] if results.get("distances") else 0
+                    
+                    selected.append({
+                        "score": 1.0 - distance,
+                        "path": metadata.get("path", ""),
+                        "heading": metadata.get("heading", ""),
+                        "content": document,
+                    })
+        
+        return selected
+    except Exception as exc:
+        log.error("GML semantic search failed: %s", exc)
+        return []
+
+
+def format_gml_snippets(snippets: list[dict]) -> str:
+    lines = [
+        "The following excerpts were retrieved from the local GameMaker markdown manual under /gml.",
+        "Use them to ground your answer when they are relevant.",
+    ]
+    for index, snippet in enumerate(snippets, 1):
+        lines.append(
+            f"\n[{index}] {snippet['path']} :: {snippet['heading']}\n{snippet['content']}"
+        )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +1085,215 @@ async def save_messages(
 
 
 # ---------------------------------------------------------------------------
+# File Tools — sandboxed local file operations
+# ---------------------------------------------------------------------------
+
+MAX_TOOL_ITERATIONS = 15
+MAX_FILE_READ_LINES = 500
+MAX_FILE_READ_BYTES = 50_000
+MAX_FILE_WRITE_BYTES = 500_000
+MAX_GREP_RESULTS = 100
+
+
+class FileToolError(Exception):
+    """Raised by file tools when an operation fails or violates constraints."""
+    pass
+
+
+def resolve_sandboxed_path(workspace_root: str, requested_path: str) -> Path:
+    """
+    Resolve a requested path relative to workspace_root, with security checks.
+    
+    Raises PermissionError if the resolved path is outside the root (including symlink escapes).
+    Raises FileToolError for other validation failures.
+    """
+    if not workspace_root or not workspace_root.strip():
+        raise FileToolError("Workspace root is not configured")
+    
+    if not requested_path or not requested_path.strip():
+        raise FileToolError("Requested path is empty")
+    
+    if "\x00" in requested_path:
+        raise FileToolError("Path contains null bytes")
+    
+    root = Path(workspace_root).resolve()
+    if not root.exists():
+        raise FileToolError(f"Workspace root does not exist: {root}")
+    
+    target = (root / requested_path).resolve()
+    
+    # Ensure target is under root (prevents ../ traversal and symlink escapes via resolve())
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise PermissionError(f"Path is outside workspace root: {target}")
+    
+    return target
+
+
+def ft_read_file(workspace_root: str, path: str, start_line: int = 1, end_line: int | None = None) -> str:
+    """Read a file with line/size limits. Returns truncation notice if limits exceeded."""
+    target = resolve_sandboxed_path(workspace_root, path)
+    if not target.is_file():
+        raise FileToolError(f"Not a file or does not exist: {target}")
+    
+    content = target.read_text(encoding="utf-8", errors="ignore")
+    lines = content.splitlines(keepends=True)
+    
+    start_idx = max(0, start_line - 1)
+    end_idx = end_line if end_line else len(lines)
+    
+    selected = lines[start_idx:end_idx]
+    result = "".join(selected)
+    
+    # Check size/line limits
+    if len(selected) >= MAX_FILE_READ_LINES:
+        result += f"\n\n[truncated at {MAX_FILE_READ_LINES} lines]"
+    if len(result) >= MAX_FILE_READ_BYTES:
+        result = result[:MAX_FILE_READ_BYTES] + f"\n\n[truncated at {MAX_FILE_READ_BYTES} bytes]"
+    
+    return result
+
+
+def ft_write_file(workspace_root: str, path: str, content: str) -> str:
+    """Write content to a file. Creates parent directories. Returns status message."""
+    target = resolve_sandboxed_path(workspace_root, path)
+    
+    if len(content) > MAX_FILE_WRITE_BYTES:
+        raise FileToolError(f"Content exceeds {MAX_FILE_WRITE_BYTES} bytes")
+    
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    return f"Successfully wrote {len(content)} bytes to {target.name}"
+
+
+def ft_replace_in_file(workspace_root: str, path: str, old_str: str, new_str: str) -> str:
+    """Replace exact string in file. Errors if match count != 1."""
+    target = resolve_sandboxed_path(workspace_root, path)
+    if not target.is_file():
+        raise FileToolError(f"Not a file or does not exist: {target}")
+    
+    content = target.read_text(encoding="utf-8", errors="ignore")
+    count = content.count(old_str)
+    
+    if count == 0:
+        raise FileToolError(f"String to replace not found in file")
+    if count > 1:
+        raise FileToolError(f"String to replace appears {count} times (expected exactly 1)")
+    
+    new_content = content.replace(old_str, new_str, 1)
+    target.write_text(new_content, encoding="utf-8")
+    return f"Successfully replaced 1 occurrence in {target.name}"
+
+
+def ft_list_dir(workspace_root: str, path: str) -> str:
+    """List directory contents. Returns names with '/' suffix for directories."""
+    if path == "" or path == ".":
+        target = Path(workspace_root).resolve()
+    else:
+        target = resolve_sandboxed_path(workspace_root, path)
+    
+    if not target.is_dir():
+        raise FileToolError(f"Not a directory or does not exist: {target}")
+    
+    entries = []
+    try:
+        items = sorted(target.iterdir())
+    except PermissionError:
+        raise FileToolError(f"Permission denied reading directory: {target}")
+    
+    if len(items) > 500:
+        items = items[:500]
+        entries.append("[listing truncated at 500 entries]")
+    
+    for item in items:
+        if item.is_dir():
+            entries.append(f"{item.name}/")
+        else:
+            entries.append(item.name)
+    
+    return "\n".join(entries)
+
+
+def ft_search_files(workspace_root: str, pattern: str, directory: str = ".") -> str:
+    """Search for files matching a glob pattern. Max 200 results."""
+    if not directory or directory == ".":
+        search_root = Path(workspace_root).resolve()
+    else:
+        search_root = resolve_sandboxed_path(workspace_root, directory)
+    
+    if not search_root.is_dir():
+        raise FileToolError(f"Not a directory: {search_root}")
+    
+    try:
+        matches = sorted(search_root.rglob(pattern))[:200]
+    except Exception as exc:
+        raise FileToolError(f"Glob search failed: {exc}")
+    
+    if not matches:
+        return f"No files matching '{pattern}' found under {directory}"
+    
+    result_lines = [f"Found {len(matches)} matches for '{pattern}':"]
+    for match in matches:
+        try:
+            rel = match.relative_to(search_root)
+            result_lines.append(str(rel))
+        except ValueError:
+            result_lines.append(str(match))
+    
+    return "\n".join(result_lines)
+
+
+def ft_grep_search(workspace_root: str, query: str, path: str, is_regex: bool = False) -> str:
+    """Search for query in file(s). Max 100 matches."""
+    import re as regex_module
+    
+    target = resolve_sandboxed_path(workspace_root, path)
+    
+    if target.is_file():
+        files = [target]
+    elif target.is_dir():
+        files = list(target.rglob("*"))
+        files = [f for f in files if f.is_file()]
+    else:
+        raise FileToolError(f"Not a file or directory: {target}")
+    
+    matches = []
+    for file in files:
+        try:
+            content = file.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        
+        lines = content.splitlines()
+        for line_num, line in enumerate(lines, 1):
+            try:
+                if is_regex:
+                    if regex_module.search(query, line):
+                        matches.append(f"{file.name}:{line_num}: {line[:100]}")
+                else:
+                    if query.lower() in line.lower():
+                        matches.append(f"{file.name}:{line_num}: {line[:100]}")
+            except Exception:
+                continue
+            
+            if len(matches) >= MAX_GREP_RESULTS:
+                matches.append(f"[truncated at {MAX_GREP_RESULTS} matches]")
+                return "\n".join(matches)
+    
+    if not matches:
+        return f"No matches for '{query}' found"
+    return "\n".join(matches)
+
+
+def ft_create_directory(workspace_root: str, path: str) -> str:
+    """Create a directory (including parents). Returns status message."""
+    target = resolve_sandboxed_path(workspace_root, path)
+    target.mkdir(parents=True, exist_ok=True)
+    return f"Successfully created directory: {target.name}"
+
+
+# ---------------------------------------------------------------------------
 # Routes — auth
 # ---------------------------------------------------------------------------
 
@@ -693,7 +1305,7 @@ async def login(body: LoginRequest):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, password_hash, role, is_active, created_at FROM users WHERE username=?",
+            "SELECT id, username, password_hash, role, is_active, file_tools_enabled, workspace_root, created_at FROM users WHERE username=?",
             (username,),
         )
         user = await cursor.fetchone()
@@ -710,6 +1322,8 @@ async def login(body: LoginRequest):
                 "id": user["id"],
                 "username": user["username"],
                 "role": user["role"],
+                "file_tools_enabled": bool(user["file_tools_enabled"]),
+                "workspace_root": user["workspace_root"],
                 "created_at": user["created_at"],
             },
         }
@@ -772,6 +1386,8 @@ async def signup(body: SignupRequest):
                 "id": user_id,
                 "username": username,
                 "role": "user",
+                "file_tools_enabled": False,
+                "workspace_root": "",
                 "created_at": now,
             },
         }
@@ -785,6 +1401,8 @@ async def auth_me(current_user: dict = Depends(get_current_user)):
         "id": current_user["id"],
         "username": current_user["username"],
         "role": current_user["role"],
+        "file_tools_enabled": bool(current_user["file_tools_enabled"]),
+        "workspace_root": current_user["workspace_root"],
         "created_at": current_user["created_at"],
     }
 
@@ -794,7 +1412,7 @@ async def admin_list_users(_: dict = Depends(require_admin)):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, created_at FROM users ORDER BY created_at ASC"
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, created_at FROM users ORDER BY created_at ASC"
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -831,6 +1449,8 @@ async def admin_create_user(body: AdminCreateUserRequest, _: dict = Depends(requ
             "username": username,
             "role": role,
             "is_active": 1,
+            "file_tools_enabled": False,
+            "workspace_root": "",
             "created_at": ts,
         }
     finally:
@@ -881,6 +1501,42 @@ async def admin_delete_user(user_id: str, current_user: dict = Depends(require_a
         await db.execute("DELETE FROM users WHERE id=?", (user_id,))
         await db.commit()
         return {"ok": True}
+    finally:
+        await db.close()
+
+
+class AdminUpdateUserToolsRequest(BaseModel):
+    file_tools_enabled: bool
+    workspace_root: str
+
+
+@app.patch("/api/admin/users/{user_id}")
+async def admin_update_user(
+    user_id: str,
+    body: AdminUpdateUserToolsRequest,
+    current_user: dict = Depends(require_admin),
+):
+    """Update file tool settings for a user."""
+    db = await get_db()
+    try:
+        cursor = await db.execute("SELECT id FROM users WHERE id=?", (user_id,))
+        if not await cursor.fetchone():
+            raise HTTPException(status_code=404, detail="User not found")
+
+        workspace_root = (body.workspace_root or "").strip()
+        await db.execute(
+            "UPDATE users SET file_tools_enabled=?, workspace_root=? WHERE id=?",
+            (int(body.file_tools_enabled), workspace_root, user_id),
+        )
+        await db.commit()
+
+        # Return updated user
+        cursor = await db.execute(
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, created_at FROM users WHERE id=?",
+            (user_id,),
+        )
+        user = await cursor.fetchone()
+        return dict(user) if user else {"ok": True}
     finally:
         await db.close()
 
@@ -978,7 +1634,21 @@ async def get_messages(conv_id: str, current_user: dict = Depends(get_current_us
 async def get_settings(_: dict = Depends(get_current_user)):
     key = get_brave_api_key()
     masked = (key[:4] + "..." + key[-4:]) if len(key) > 8 else ("*" * len(key) if key else "")
-    return {"brave_api_key_set": bool(key), "brave_api_key_masked": masked}
+    gml_index = await ensure_gml_index_loaded()
+    embeddings_enabled = CHROMADB_AVAILABLE and getattr(app.state, "embeddings_ready", False)
+    embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "embeddings_building", False)
+    return {
+        "brave_api_key_set": bool(key),
+        "brave_api_key_masked": masked,
+        "gml_docs_enabled": bool(gml_index.get("enabled")),
+        "gml_docs_file_count": gml_index.get("file_count", 0),
+        "gml_docs_chunk_count": gml_index.get("chunk_count", 0),
+        "gml_docs_indexed_at": gml_index.get("indexed_at", ""),
+        "gml_docs_error": gml_index.get("error", ""),
+        "gml_embeddings_enabled": embeddings_enabled,
+        "gml_embeddings_building": embeddings_building,
+        "gml_embeddings_model": "all-MiniLM-L6-v2" if embeddings_enabled else None,
+    }
 
 
 @app.post("/api/settings")
@@ -989,8 +1659,421 @@ async def update_settings(body: SettingsUpdate, _: dict = Depends(get_current_us
     return {"ok": True}
 
 
+@app.post("/api/chat/command-approval")
+async def command_approval(
+    body: CommandApprovalRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Handle user approval/denial of command execution.
+    
+    The frontend calls this when the user clicks [Approve] or [Deny] on a permission prompt.
+    We look up the pending approval by cmd_id, verify it belongs to this user's session,
+    then set the event + result so the streaming loop can continue.
+    """
+    cmd_id = body.cmd_id
+    async with _pending_approvals_lock:
+        if cmd_id not in _pending_approvals:
+            raise HTTPException(
+                status_code=404,
+                detail="Command approval request not found or already processed",
+            )
+        event, user_id, _, command = _pending_approvals[cmd_id]
+        
+        # Security: ensure this approval belongs to the requesting user
+        if user_id != current_user["id"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Cannot approve another user's command",
+            )
+        
+        # Update the result and signal the waiting stream
+        _pending_approvals[cmd_id] = (event, user_id, body.approved, command)
+        event.set()
+    
+    return {"ok": True, "approved": body.approved}
+
+
 # ---------------------------------------------------------------------------
-# Chat — streaming SSE with agentic Brave Search loop
+# Tool Schemas — Ollama native function calling
+# ---------------------------------------------------------------------------
+
+def get_web_search_tool() -> dict:
+    """Web search tool schema."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web using Brave Search API for current information and facts.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query (e.g., 'latest AI news' or 'Python asyncio best practices')",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }
+
+
+def get_file_tools_schemas() -> list[dict]:
+    """Return all file operation tool schemas."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file with optional line range limits. Automatically truncates if file is too large.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Relative path to the file (relative to workspace root)",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "Starting line number (1-indexed, default 1)",
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "Ending line number (1-indexed, default to end of file)",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "description": "Write or overwrite a file. Creates parent directories if needed.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Relative path to the file (relative to workspace root)",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The complete file content to write",
+                        },
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "replace_in_file",
+                "description": "Replace exactly one occurrence of a string in a file. Errors if match count != 1.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Relative path to the file",
+                        },
+                        "old_str": {
+                            "type": "string",
+                            "description": "The exact string to find and replace",
+                        },
+                        "new_str": {
+                            "type": "string",
+                            "description": "The replacement string",
+                        },
+                    },
+                    "required": ["path", "old_str", "new_str"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_dir",
+                "description": "List directory contents. Directories are suffixed with '/'.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Relative path to the directory (default: workspace root)",
+                        },
+                    },
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "search_files",
+                "description": "Search for files matching a glob pattern under a directory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern (e.g., '*.py' or '**/test_*.py')",
+                        },
+                        "directory": {
+                            "type": "string",
+                            "description": "Search directory (default: current workspace root)",
+                        },
+                    },
+                    "required": ["pattern"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "grep_search",
+                "description": "Search for a text query in file(s). Can search a single file or recursively in a directory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Text or regex pattern to search for",
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "File or directory path to search in",
+                        },
+                        "is_regex": {
+                            "type": "boolean",
+                            "description": "If true, treat query as regex pattern (default: false)",
+                        },
+                    },
+                    "required": ["query", "path"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "create_directory",
+                "description": "Create a directory (including parent directories).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Relative path to the directory to create",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            },
+        },
+    ]
+
+
+def get_execute_command_tool() -> dict:
+    """Execute shell command tool schema. Always requires user approval."""
+    return {
+        "type": "function",
+        "function": {
+            "name": "execute_command",
+            "description": (
+                "Execute a shell command. This always requires user approval before execution. "
+                "The user will see a confirmation prompt in the chat UI."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to execute (e.g., 'python -m py_compile server.py')",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory for the command (default: workspace root)",
+                    },
+                },
+                "required": ["command"],
+            },
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool Execution Helpers
+# ---------------------------------------------------------------------------
+
+async def execute_tool(
+    tool_name: str,
+    tool_args: dict,
+    current_user: dict,
+    session_user_id: str,  # for command approval tracking
+    cmd_id: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Execute a tool and return (success, result_text).
+    For execute_command, this will wait for user approval before running.
+    """
+    workspace_root = current_user.get("workspace_root", "")
+    if not workspace_root:
+        return False, "[Error: workspace root not configured]"
+    
+    try:
+        if tool_name == "web_search":
+            query = tool_args.get("query", "")
+            if not query:
+                return False, "[Error: query is required]"
+            api_key = get_brave_api_key()
+            if not api_key:
+                return False, "[Error: No Brave API key configured]"
+            results = await brave_search(query, api_key)
+            return True, format_search_results(query, results)
+        
+        elif tool_name == "read_file":
+            path = tool_args.get("path", "")
+            start_line = tool_args.get("start_line", 1)
+            end_line = tool_args.get("end_line")
+            result = await asyncio.to_thread(
+                ft_read_file, workspace_root, path, start_line, end_line
+            )
+            return True, result
+        
+        elif tool_name == "write_file":
+            path = tool_args.get("path", "")
+            content = tool_args.get("content", "")
+            result = await asyncio.to_thread(ft_write_file, workspace_root, path, content)
+            return True, result
+        
+        elif tool_name == "replace_in_file":
+            path = tool_args.get("path", "")
+            old_str = tool_args.get("old_str", "")
+            new_str = tool_args.get("new_str", "")
+            result = await asyncio.to_thread(
+                ft_replace_in_file, workspace_root, path, old_str, new_str
+            )
+            return True, result
+        
+        elif tool_name == "list_dir":
+            path = tool_args.get("path", "")
+            result = await asyncio.to_thread(ft_list_dir, workspace_root, path)
+            return True, result
+        
+        elif tool_name == "search_files":
+            pattern = tool_args.get("pattern", "")
+            directory = tool_args.get("directory", ".")
+            result = await asyncio.to_thread(
+                ft_search_files, workspace_root, pattern, directory
+            )
+            return True, result
+        
+        elif tool_name == "grep_search":
+            query = tool_args.get("query", "")
+            path = tool_args.get("path", "")
+            is_regex = tool_args.get("is_regex", False)
+            result = await asyncio.to_thread(
+                ft_grep_search, workspace_root, query, path, is_regex
+            )
+            return True, result
+        
+        elif tool_name == "create_directory":
+            path = tool_args.get("path", "")
+            result = await asyncio.to_thread(ft_create_directory, workspace_root, path)
+            return True, result
+        
+        elif tool_name == "execute_command":
+            command = tool_args.get("command", "")
+            cwd = tool_args.get("cwd")
+            if not command:
+                return False, "[Error: command is required]"
+            return await _wait_for_command_approval_and_execute(
+                command, cwd or workspace_root, session_user_id, cmd_id
+            )
+        
+        else:
+            return False, f"[Error: unknown tool '{tool_name}']"
+    
+    except FileToolError as exc:
+        return False, f"[Error: {str(exc)}]"
+    except PermissionError as exc:
+        return False, f"[Permission denied: {str(exc)}]"
+    except Exception as exc:
+        log.exception("Tool execution error for %s", tool_name)
+        return False, f"[Error: {str(exc)}]"
+
+
+async def _wait_for_command_approval_and_execute(
+    command: str, cwd: str, user_id: str, cmd_id: str | None
+) -> tuple[bool, str]:
+    """
+    Create a pending approval entry, wait for user approval, then execute or deny.
+    Returns (success, output).
+    """
+    if not cmd_id:
+        cmd_id = str(uuid.uuid4())
+    event = asyncio.Event()
+    
+    async with _pending_approvals_lock:
+        _pending_approvals[cmd_id] = (event, user_id, False, command)
+    
+    try:
+        # Wait up to 120 seconds for approval (emit permission_required event happens in event_stream)
+        await asyncio.wait_for(event.wait(), timeout=120.0)
+    except asyncio.TimeoutError:
+        async with _pending_approvals_lock:
+            if cmd_id in _pending_approvals:
+                del _pending_approvals[cmd_id]
+        return False, "[Command timed out waiting for user approval (120 seconds)]"
+    
+    # Get the approval result
+    async with _pending_approvals_lock:
+        if cmd_id not in _pending_approvals:
+            return False, "[Command approval state lost]"
+        _, _, approved, _ = _pending_approvals[cmd_id]
+        del _pending_approvals[cmd_id]
+    
+    if not approved:
+        return False, "[User denied command execution]"
+    
+    # Execute the command
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            limit=10_000,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=30.0
+            )
+        except asyncio.TimeoutError:
+            proc.kill()
+            _ = await proc.wait()
+            return False, "[Command execution timed out (30 seconds)]"
+        
+        exit_code = proc.returncode
+        output = stdout.decode("utf-8", errors="replace")
+        error = stderr.decode("utf-8", errors="replace")
+        
+        result = f"Exit code: {exit_code}\n"
+        if output:
+            result += f"\nStdout:\n{output[:5000]}"
+        if error:
+            result += f"\nStderr:\n{error[:5000]}"
+        return exit_code == 0, result
+    
+    except Exception as exc:
+        log.exception("Command execution failed: %s", command)
+        return False, f"[Command execution error: {str(exc)}]"
+
+
+# ---------------------------------------------------------------------------
+# Chat — streaming SSE with native tool calling
 # ---------------------------------------------------------------------------
 
 @app.post("/api/chat")
@@ -1000,6 +2083,9 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             status_code=503,
             detail="Ollama is not available on port 11434 and auto-start failed. Start it with `ollama serve`.",
         )
+
+    # Validate file tools permission
+    use_file_tools = req.use_file_tools and bool(current_user.get("file_tools_enabled"))
 
     db = await get_db()
     try:
@@ -1018,14 +2104,29 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             if fts_snippets:
                 log.info("Injecting %d FTS snippet(s) for conv %s", len(fts_snippets), req.conversation_id)
 
+        gml_snippets: list[dict] = []
+        if req.use_gml_docs:
+            await ensure_gml_index_loaded()
+            gml_snippets = search_gml_docs(req.message)
+            if gml_snippets:
+                log.info("Injecting %d GML snippet(s) for conv %s", len(gml_snippets), req.conversation_id)
+
         # Build base message list
         ollama_messages: list[dict] = []
 
-        # 1. Search capability system prompt (always included when search is on)
-        if req.use_search:
-            ollama_messages.append({"role": "system", "content": SEARCH_SYSTEM_PROMPT})
+        # System prompts based on requested features
+        if req.use_gml_docs:
+            ollama_messages.append({"role": "system", "content": GML_SYSTEM_PROMPT})
+            if gml_snippets:
+                ollama_messages.append({
+                    "role": "system",
+                    "content": format_gml_snippets(gml_snippets),
+                })
 
-        # 2. Long-term memory injection
+        if use_file_tools:
+            ollama_messages.append({"role": "system", "content": FILE_TOOLS_SYSTEM_PROMPT})
+
+        # Long-term memory injection
         if fts_snippets:
             snippets_text = "\n\n---\n\n".join(fts_snippets)
             ollama_messages.append({
@@ -1037,7 +2138,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 ),
             })
 
-        # 3. Conversation history + new user message
+        # Conversation history + new user message
         ollama_messages.extend(history)
         ollama_messages.append({"role": "user", "content": req.message})
 
@@ -1051,20 +2152,42 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
     requested_model = normalize_model_name(req.model)
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        all_thinking = ""   # accumulated across all iterations
-        final_content = ""  # the last iteration's clean answer
-        searches_done = 0
+        all_thinking = ""
+        final_content = ""
+        tools_called = 0
+        commands_run = 0
+        file_reads = 0
+        file_writes = 0
         working_msgs = list(ollama_messages)
+        
+        def _build_tools_list() -> list[dict]:
+            """Build tool list based on enabled features."""
+            tools = []
+            if req.use_search:
+                tools.append(get_web_search_tool())
+            if use_file_tools:
+                tools.extend(get_file_tools_schemas())
+                tools.append(get_execute_command_tool())
+            return tools
 
         def _payload(msgs: list[dict]) -> dict:
-            return {"model": requested_model, "messages": msgs, "think": req.think, "stream": True}
+            payload = {
+                "model": requested_model,
+                "messages": msgs,
+                "think": req.think,
+                "stream": True,
+            }
+            tools = _build_tools_list()
+            if tools:
+                payload["tools"] = tools
+            return payload
 
         try:
             async with aiohttp.ClientSession() as session:
-                for iteration in range(MAX_SEARCH_ITERATIONS + 1):
-                    is_last_allowed = (iteration == MAX_SEARCH_ITERATIONS)
+                for iteration in range(MAX_TOOL_ITERATIONS):
                     turn_content = ""
                     turn_thinking = ""
+                    turn_tool_calls: list[dict] = []
 
                     async with session.post(OLLAMA_URL, json=_payload(working_msgs)) as resp:
                         if resp.status != 200:
@@ -1072,82 +2195,109 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                             yield f"data: {json.dumps({'type': 'error', 'message': body})}\n\n"
                             return
 
+                        # Accumulate all chunks first to get tool_calls which come in the final chunk
+                        all_chunks = []
                         async for raw_line in resp.content:
                             line = raw_line.decode("utf-8").strip()
                             if not line:
                                 continue
                             try:
                                 chunk = json.loads(line)
+                                all_chunks.append(chunk)
                             except json.JSONDecodeError:
                                 continue
 
-                            msg_chunk = chunk.get("message", {})
-                            td = msg_chunk.get("thinking", "")
-                            cd = msg_chunk.get("content", "")
+                    # Process accumulated chunks
+                    for chunk in all_chunks:
+                        msg_chunk = chunk.get("message", {})
+                        td = msg_chunk.get("thinking", "")
+                        cd = msg_chunk.get("content", "")
 
-                            if td:
-                                turn_thinking += td
-                                all_thinking += td
-                                yield f"data: {json.dumps({'type': 'thinking', 'delta': td})}\n\n"
+                        if td:
+                            turn_thinking += td
+                            all_thinking += td
+                            yield f"data: {json.dumps({'type': 'thinking', 'delta': td})}\n\n"
 
-                            if cd:
-                                turn_content += cd
-                                # Stream content live only on the final iteration
-                                if is_last_allowed:
-                                    final_content += cd
-                                    yield f"data: {json.dumps({'type': 'content', 'delta': cd})}\n\n"
+                        if cd:
+                            turn_content += cd
+                            final_content += cd
+                            yield f"data: {json.dumps({'type': 'content', 'delta': cd})}\n\n"
 
-                    # ── Turn complete ──────────────────────────────────────
-                    if not is_last_allowed:
-                        queries = extract_search_queries(turn_content) if req.use_search else []
+                        # Tool calls come at the end, but check each chunk
+                        if "tool_calls" in msg_chunk:
+                            turn_tool_calls.extend(msg_chunk.get("tool_calls", []))
 
-                        if not queries:
-                            # Model answered without searching — emit content and finish
-                            final_content = strip_search_tags(turn_content)
-                            if final_content:
-                                yield f"data: {json.dumps({'type': 'content', 'delta': final_content})}\n\n"
-                            break
+                    # ── Turn complete ──
+                    if not turn_tool_calls:
+                        # No tools — answer is complete
+                        break
 
-                        # Model wants to search — annotate the thinking block
-                        hint = f"\n\n[Searching: {', '.join(repr(q) for q in queries)}]\n"
-                        all_thinking += hint
-                        yield f"data: {json.dumps({'type': 'thinking', 'delta': hint})}\n\n"
-
-                        # Execute searches
-                        result_blocks: list[str] = []
-                        api_key = get_brave_api_key()
-                        for query in queries:
-                            if not api_key:
-                                yield f"data: {json.dumps({'type': 'search_start', 'query': query, 'error': 'No Brave API key configured'})}\n\n"
-                                result_blocks.append(
-                                    f"[Search skipped — no Brave API key configured. Query was: {query}]"
-                                )
-                                continue
-                            searches_done += 1
-                            log.info("Brave search [%d]: %s", searches_done, query)
-                            yield f"data: {json.dumps({'type': 'search_start', 'query': query})}\n\n"
-                            results = await brave_search(query, api_key)
-                            yield f"data: {json.dumps({'type': 'search_done', 'query': query, 'count': len(results)})}\n\n"
-                            result_blocks.append(format_search_results(query, results))
-
-                        # Inject results for next Ollama turn
+                    # Execute tool calls and inject results
+                    for tool_call in turn_tool_calls:
+                        tool_name = tool_call.get("function", {}).get("name", "")
+                        raw_tool_args = tool_call.get("function", {}).get("arguments", {})
+                        if isinstance(raw_tool_args, str):
+                            try:
+                                tool_args = json.loads(raw_tool_args) if raw_tool_args.strip() else {}
+                            except json.JSONDecodeError:
+                                tool_args = {}
+                        elif isinstance(raw_tool_args, dict):
+                            tool_args = raw_tool_args
+                        else:
+                            tool_args = {}
+                        approval_cmd_id = tool_call.get("id", "") or str(uuid.uuid4())
+                        
+                        tools_called += 1
+                        
+                        if tool_name == "execute_command":
+                            commands_run += 1
+                            # Emit permission_required event
+                            yield f"data: {json.dumps({'type': 'permission_required', 'cmd_id': approval_cmd_id, 'command': tool_args.get('command', ''), 'cwd': tool_args.get('cwd', '')})}\n\n"
+                        elif tool_name in ("read_file",):
+                            file_reads += 1
+                        elif tool_name in ("write_file", "replace_in_file", "create_directory"):
+                            file_writes += 1
+                        
+                        # Emit tool_call event
+                        yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': tool_args})}\n\n"
+                        
+                        # Execute the tool
+                        success, result = await execute_tool(
+                            tool_name,
+                            tool_args,
+                            current_user,
+                            current_user["id"],
+                            approval_cmd_id if tool_name == "execute_command" else None,
+                        )
+                        
+                        # Emit tool_result event
+                        summary = result[:200] if len(result) > 200 else result
+                        yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': success, 'summary': summary})}\n\n"
+                        
+                        # Inject tool result into conversation
                         working_msgs.append({
                             "role": "assistant",
                             "content": turn_content,
+                            "tool_calls": [tool_call],
                             **({"thinking": turn_thinking} if turn_thinking else {}),
                         })
                         working_msgs.append({
-                            "role": "user",
-                            "content": (
-                                "Here are the search results:\n\n"
-                                + "\n\n---\n\n".join(result_blocks)
-                                + "\n\nPlease provide your complete answer now."
-                            ),
+                            "role": "tool",
+                            "content": result,
+                            "tool_call_id": tool_call.get("id", ""),
                         })
-                    # else: is_last_allowed — content already streamed live above
 
+                    # If we handled tool calls, loop to next turn
+                    if turn_tool_calls:
+                        # Reset content accumulators for next turn
+                        turn_content = ""
+                        turn_thinking = ""
+                        turn_tool_calls = []
+                        continue
+
+            # Stream completed successfully
             token_count = estimate_tokens(final_content + all_thinking)
-            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'searches_done': searches_done})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'commands_run': commands_run, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': bool(gml_snippets), 'gml_snippet_count': len(gml_snippets)})}\n\n"
 
         except aiohttp.ClientConnectorError:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Cannot connect to Ollama. Is it running? (ollama serve)'})}\n\n"

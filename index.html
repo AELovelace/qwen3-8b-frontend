@@ -311,6 +311,64 @@
   }
   .search-indicator.done { color: #7ecb6f; background: rgba(126,203,111,0.08); border-color: rgba(126,203,111,0.25); }
 
+  .tool-indicator {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 5px 10px;
+    background: rgba(100, 190, 255, 0.08);
+    border: 1px solid rgba(100, 190, 255, 0.25);
+    border-radius: 7px;
+    font-size: 12px;
+    color: #8dd3ff;
+  }
+  .tool-indicator .si-spinner {
+    width: 10px; height: 10px;
+    border: 2px solid rgba(141, 211, 255, 0.3);
+    border-top-color: #8dd3ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+  }
+  .tool-indicator.done {
+    color: #7ecb6f;
+    background: rgba(126,203,111,0.08);
+    border-color: rgba(126,203,111,0.25);
+  }
+  .tool-indicator.error {
+    color: #ff9f9f;
+    background: rgba(255,107,107,0.1);
+    border-color: rgba(255,107,107,0.3);
+  }
+
+  .permission-card {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 8px 10px;
+    background: rgba(255, 215, 100, 0.1);
+    border: 1px solid rgba(255, 215, 100, 0.35);
+    border-radius: 8px;
+    color: #ffd166;
+    font-size: 12px;
+  }
+  .permission-card .perm-actions {
+    display: flex;
+    gap: 8px;
+  }
+  .permission-card button {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface2);
+    color: var(--text);
+    font-size: 11px;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+  .permission-card button:hover {
+    border-color: var(--accent);
+  }
+
   /* ── Cursor blink ─────────────────────────────────────────────────── */
   .cursor::after {
     content: '▋';
@@ -521,12 +579,46 @@
   }
   .admin-user-row {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr;
     gap: 6px;
     align-items: center;
     font-size: 12px;
+    padding: 6px;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 7px;
   }
   .admin-user-meta { color: var(--text-dim); font-size: 11px; }
+  .admin-tools-controls {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    gap: 6px;
+    align-items: center;
+  }
+  .admin-tools-controls label {
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+  .admin-input-sm {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 11px;
+    padding: 4px 6px;
+    width: 100%;
+  }
+  .admin-save-btn {
+    border: 1px solid var(--accent-dim);
+    color: var(--text);
+    background: rgba(156,58,140,0.18);
+    border-radius: 6px;
+    padding: 4px 7px;
+    font-size: 11px;
+    cursor: pointer;
+  }
   .admin-del-btn {
     border: 1px solid rgba(255, 107, 107, 0.35);
     color: var(--error);
@@ -556,11 +648,66 @@
     #main { min-height: 55vh; }
   }
 
+  /* ── Code blocks (markdown) ────────────────────────────────────────── */
+  .bubble code {
+    background: rgba(0,0,0,0.2);
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Courier New', monospace;
+    font-size: 13px;
+  }
+  .bubble pre {
+    background: rgba(0,0,0,0.35);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 6px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 8px 0;
+    font-family: 'Cascadia Code', 'Fira Code', 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+  .bubble pre code {
+    background: none;
+    padding: 0;
+    color: inherit;
+    display: block;
+  }
+  .bubble a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .bubble a:hover {
+    text-decoration: underline;
+  }
+  .bubble strong {
+    color: #fff;
+    font-weight: 600;
+  }
+  .bubble em {
+    font-style: italic;
+  }
+  .bubble ul, .bubble ol {
+    margin: 8px 0 8px 20px;
+  }
+  .bubble li {
+    margin: 2px 0;
+  }
+  .bubble blockquote {
+    border-left: 3px solid var(--accent-dim);
+    padding-left: 12px;
+    margin: 8px 0;
+    color: var(--text-dim);
+  }
+
   /* ── Scrollbar ────────────────────────────────────────────────────── */
   ::-webkit-scrollbar { width: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 </style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" />
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
 <body>
 <div id="auth-gate">
@@ -684,6 +831,22 @@
         <input id="model-input" type="text" value="huihui_ai/qwen3-abliterated:8b" autocomplete="off" spellcheck="false" />
       </div>
       <div class="setting-group">
+        <label for="gml-docs-toggle">GameMaker Manual</label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+          <input id="gml-docs-toggle" type="checkbox" checked />
+          Use local /gml markdown for GML advice
+        </label>
+        <div id="gml-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+      </div>
+      <div class="setting-group">
+        <label for="file-tools-toggle">Agent File Tools</label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+          <input id="file-tools-toggle" type="checkbox" />
+          Allow model to read/edit local files
+        </label>
+        <div id="file-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+      </div>
+      <div class="setting-group">
         <label for="brave-key-input">Brave Search API Key</label>
         <input id="brave-key-input" type="password" placeholder="Paste key here…" autocomplete="off" />
         <button id="brave-save-btn">Save Key</button>
@@ -715,6 +878,10 @@ const emptyEl = document.getElementById('empty-state');
 const userInput = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
 const modelInput = document.getElementById('model-input');
+const gmlDocsToggle = document.getElementById('gml-docs-toggle');
+const gmlStatusEl = document.getElementById('gml-status');
+const fileToolsToggle = document.getElementById('file-tools-toggle');
+const fileToolsStatusEl = document.getElementById('file-tools-status');
 const newChatBtn = document.getElementById('new-chat-btn');
 
 const accountUsernameEl = document.getElementById('account-username');
@@ -797,6 +964,17 @@ async function applyAuthenticatedState(user) {
   accountUsernameEl.textContent = user.username;
   accountRoleEl.textContent = user.role;
   adminPanelEl.style.display = user.role === 'admin' ? 'flex' : 'none';
+  if (user.file_tools_enabled) {
+    fileToolsToggle.disabled = false;
+    fileToolsStatusEl.style.color = 'var(--accent)';
+    const rootLabel = user.workspace_root ? `Root: ${user.workspace_root}` : 'Root not configured by admin';
+    fileToolsStatusEl.textContent = `Enabled for your account. ${rootLabel}`;
+  } else {
+    fileToolsToggle.checked = false;
+    fileToolsToggle.disabled = true;
+    fileToolsStatusEl.style.color = 'var(--text-dim)';
+    fileToolsStatusEl.textContent = 'Disabled for your account. Ask an admin to enable access.';
+  }
   if (user.role === 'admin') {
     await loadAdminUsers();
   }
@@ -1007,7 +1185,28 @@ function appendUserMessage(text) {
   return row;
 }
 
-function appendAssistantMessage(initialContent = '', initialThinking = '', withCursor = false, showFts = false, searchCount = 0) {
+function renderMarkdown(text) {
+  if (!window.marked) return text;
+  try {
+    return marked.parse(text);
+  } catch (e) {
+    console.error('Markdown parsing error:', e);
+    return text;
+  }
+}
+
+function highlightCode(element) {
+  if (!window.hljs) return;
+  element.querySelectorAll('pre code').forEach(block => {
+    try {
+      window.hljs.highlightElement(block);
+    } catch (e) {
+      console.error('Syntax highlighting error:', e);
+    }
+  });
+}
+
+function appendAssistantMessage(initialContent = '', initialThinking = '', withCursor = false, showFts = false, searchCount = 0, gmlCount = 0, toolCount = 0) {
   hideEmpty();
   const row = document.createElement('div');
   row.className = 'msg-row assistant';
@@ -1032,13 +1231,33 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   webEl.textContent = `🌐 ${searchCount} web search${searchCount !== 1 ? 'es' : ''}`;
   webEl.style.display = searchCount > 0 ? 'inline-flex' : 'none';
 
+  const gmlEl = document.createElement('span');
+  gmlEl.className = 'meta-badge';
+  gmlEl.textContent = `GML manual: ${gmlCount} snippet${gmlCount !== 1 ? 's' : ''}`;
+  gmlEl.style.display = gmlCount > 0 ? 'inline-flex' : 'none';
+
+  const toolsEl = document.createElement('span');
+  toolsEl.className = 'meta-badge';
+  toolsEl.textContent = `🔧 ${toolCount} tool call${toolCount !== 1 ? 's' : ''}`;
+  toolsEl.style.display = toolCount > 0 ? 'inline-flex' : 'none';
+
   badgeRow.appendChild(ftsEl);
   badgeRow.appendChild(webEl);
+  badgeRow.appendChild(gmlEl);
+  badgeRow.appendChild(toolsEl);
   body.appendChild(badgeRow);
 
   const searchIndicatorsEl = document.createElement('div');
   searchIndicatorsEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
   body.appendChild(searchIndicatorsEl);
+
+  const toolIndicatorsEl = document.createElement('div');
+  toolIndicatorsEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+  body.appendChild(toolIndicatorsEl);
+
+  const permissionEl = document.createElement('div');
+  permissionEl.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
+  body.appendChild(permissionEl);
 
   const details = document.createElement('details');
   details.className = 'thinking-block';
@@ -1061,15 +1280,30 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble' + (withCursor ? ' cursor' : '');
-  bubble.textContent = initialContent;
+  if (initialContent) {
+    bubble.innerHTML = renderMarkdown(initialContent);
+  }
 
   body.appendChild(bubble);
   row.appendChild(av);
   row.appendChild(body);
   messagesEl.appendChild(row);
+  highlightCode(bubble);
   scrollToBottom();
 
-  return { thinkingContent, contentBubble: bubble, details, spinner, ftsEl, webEl, searchIndicatorsEl };
+  return {
+    thinkingContent,
+    contentBubble: bubble,
+    details,
+    spinner,
+    ftsEl,
+    webEl,
+    gmlEl,
+    toolsEl,
+    searchIndicatorsEl,
+    toolIndicatorsEl,
+    permissionEl,
+  };
 }
 
 /* ── Send and stream ────────────────────────────────────────────────── */
@@ -1091,13 +1325,50 @@ async function handleSend() {
   streaming = true;
   sendBtn.disabled = true;
 
-  const { thinkingContent, contentBubble, details, spinner, ftsEl, webEl, searchIndicatorsEl } =
-    appendAssistantMessage('', '', true, false, 0);
+  const {
+    thinkingContent,
+    contentBubble,
+    details,
+    spinner,
+    ftsEl,
+    webEl,
+    gmlEl,
+    toolsEl,
+    searchIndicatorsEl,
+    toolIndicatorsEl,
+    permissionEl,
+  } =
+    appendAssistantMessage('', '', true, false, 0, 0);
 
   let hasThinking = false;
   let hasContent = false;
   let searchesDone = 0;
+  let toolsDone = 0;
   const activeSearchEls = new Map();
+  const pendingToolEls = new Map();
+
+  async function submitCommandApproval(cmdId, approved, card, statusEl) {
+    try {
+      await apiFetch('/api/chat/command-approval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cmd_id: cmdId, approved }),
+      });
+      if (statusEl) {
+        statusEl.textContent = approved ? 'Approved. Command running...' : 'Denied. Model will continue without execution.';
+        statusEl.style.color = approved ? '#7ecb6f' : 'var(--text-dim)';
+      }
+      if (card) {
+        const buttons = card.querySelectorAll('button');
+        buttons.forEach(btn => { btn.disabled = true; });
+      }
+    } catch (err) {
+      if (statusEl) {
+        statusEl.textContent = `Approval failed: ${err.message || err}`;
+        statusEl.style.color = 'var(--error)';
+      }
+    }
+  }
 
   try {
     const res = await apiFetch('/api/chat', {
@@ -1108,6 +1379,9 @@ async function handleSend() {
         message: text,
         model: modelInput.value.trim() || 'huihui_ai/qwen3-abliterated:8b',
         think: true,
+        use_search: true,
+        use_gml_docs: gmlDocsToggle.checked,
+        use_file_tools: fileToolsToggle.checked,
       }),
       throwOnError: false,
     });
@@ -1158,6 +1432,8 @@ async function handleSend() {
             hasContent = true;
           }
           contentBubble.textContent += evt.delta;
+          contentBubble.innerHTML = renderMarkdown(contentBubble.textContent);
+          highlightCode(contentBubble);
           scrollToBottom();
 
         } else if (evt.type === 'search_start') {
@@ -1189,12 +1465,90 @@ async function handleSend() {
           contentBubble.classList.remove('cursor');
           spinner.style.display = 'none';
           if (evt.fts_used) ftsEl.style.display = 'inline-flex';
+          if (evt.gml_used) {
+            gmlEl.textContent = `GML manual: ${evt.gml_snippet_count} snippet${evt.gml_snippet_count !== 1 ? 's' : ''}`;
+            gmlEl.style.display = 'inline-flex';
+          }
           if (evt.searches_done > 0) {
             searchesDone = evt.searches_done;
             webEl.textContent = `🌐 ${searchesDone} web search${searchesDone !== 1 ? 'es' : ''}`;
             webEl.style.display = 'inline-flex';
           }
+          if (evt.tools_called > 0) {
+            toolsDone = evt.tools_called;
+            toolsEl.textContent = `🔧 ${toolsDone} tool call${toolsDone !== 1 ? 's' : ''}`;
+            toolsEl.style.display = 'inline-flex';
+          }
           await loadConversations();
+
+        } else if (evt.type === 'tool_call') {
+          const ind = document.createElement('div');
+          ind.className = 'tool-indicator';
+          const si = document.createElement('span');
+          si.className = 'si-spinner';
+          ind.appendChild(si);
+          const lbl = document.createElement('span');
+          const argsPreview = (() => {
+            try {
+              const raw = JSON.stringify(evt.args || {});
+              return raw.length > 90 ? raw.slice(0, 90) + '...' : raw;
+            } catch {
+              return '';
+            }
+          })();
+          lbl.textContent = `Tool: ${evt.name}${argsPreview ? ` ${argsPreview}` : ''}`;
+          ind.appendChild(lbl);
+          toolIndicatorsEl.appendChild(ind);
+          if (!pendingToolEls.has(evt.name)) pendingToolEls.set(evt.name, []);
+          pendingToolEls.get(evt.name).push(ind);
+          scrollToBottom();
+
+        } else if (evt.type === 'tool_result') {
+          const queue = pendingToolEls.get(evt.name) || [];
+          const ind = queue.length ? queue.shift() : null;
+          if (ind) {
+            ind.classList.add(evt.ok ? 'done' : 'error');
+            const sp = ind.querySelector('.si-spinner');
+            if (sp) sp.style.display = 'none';
+            const textEl = ind.querySelector('span:last-child');
+            if (textEl) textEl.textContent = `${evt.ok ? 'Done' : 'Failed'}: ${evt.name} - ${evt.summary || ''}`;
+          }
+          scrollToBottom();
+
+        } else if (evt.type === 'permission_required') {
+          const card = document.createElement('div');
+          card.className = 'permission-card';
+
+          const msg = document.createElement('div');
+          msg.textContent = `Permission required to run command: ${evt.command || '(empty command)'}`;
+          card.appendChild(msg);
+
+          if (evt.cwd) {
+            const cwd = document.createElement('div');
+            cwd.style.color = 'var(--text-dim)';
+            cwd.textContent = `cwd: ${evt.cwd}`;
+            card.appendChild(cwd);
+          }
+
+          const actions = document.createElement('div');
+          actions.className = 'perm-actions';
+          const allowBtn = document.createElement('button');
+          allowBtn.textContent = 'Allow';
+          const denyBtn = document.createElement('button');
+          denyBtn.textContent = 'Deny';
+          actions.appendChild(allowBtn);
+          actions.appendChild(denyBtn);
+          card.appendChild(actions);
+
+          const status = document.createElement('div');
+          status.style.color = 'var(--text-dim)';
+          card.appendChild(status);
+
+          allowBtn.addEventListener('click', () => submitCommandApproval(evt.cmd_id, true, card, status));
+          denyBtn.addEventListener('click', () => submitCommandApproval(evt.cmd_id, false, card, status));
+
+          permissionEl.appendChild(card);
+          scrollToBottom();
 
         } else if (evt.type === 'error') {
           contentBubble.classList.remove('cursor');
@@ -1226,9 +1580,25 @@ async function loadBraveStatus() {
       braveStatusEl.textContent = 'No key - web search disabled';
       braveStatusEl.style.color = 'var(--text-dim)';
     }
+
+    if (data.gml_docs_enabled) {
+      let statusText = `Indexed ${data.gml_docs_file_count} files into ${data.gml_docs_chunk_count} retrieval chunks`;
+      if (data.gml_embeddings_enabled) {
+        statusText += ` • Using semantic search (${data.gml_embeddings_model})`;
+      } else if (data.gml_embeddings_building) {
+        statusText += ' • Building semantic index…';
+      }
+      gmlStatusEl.textContent = statusText;
+      gmlStatusEl.style.color = 'var(--accent)';
+    } else {
+      gmlStatusEl.textContent = data.gml_docs_error || 'No /gml markdown index available';
+      gmlStatusEl.style.color = 'var(--error)';
+    }
   } catch {
     braveStatusEl.textContent = 'Could not load key status';
     braveStatusEl.style.color = 'var(--error)';
+    gmlStatusEl.textContent = 'Could not load GML index status';
+    gmlStatusEl.style.color = 'var(--error)';
   }
 }
 
@@ -1282,6 +1652,53 @@ function renderAdminUsers(users) {
     meta.appendChild(info);
 
     row.appendChild(meta);
+
+    const controls = document.createElement('div');
+    controls.className = 'admin-tools-controls';
+
+    const toolsLabel = document.createElement('label');
+    const toolsToggle = document.createElement('input');
+    toolsToggle.type = 'checkbox';
+    toolsToggle.checked = !!user.file_tools_enabled;
+    toolsLabel.appendChild(toolsToggle);
+    toolsLabel.append('Tools');
+    controls.appendChild(toolsLabel);
+
+    const rootInput = document.createElement('input');
+    rootInput.className = 'admin-input-sm';
+    rootInput.type = 'text';
+    rootInput.placeholder = 'Workspace root, e.g. C:/Scripts/qwen3-8b-frontend';
+    rootInput.value = user.workspace_root || '';
+    controls.appendChild(rootInput);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'admin-save-btn';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', async () => {
+      saveBtn.disabled = true;
+      try {
+        await apiFetch(`/api/admin/users/${user.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_tools_enabled: toolsToggle.checked,
+            workspace_root: rootInput.value.trim(),
+          }),
+        });
+        setAdminStatus(`Updated tools settings for ${user.username}`);
+        if (currentUser && currentUser.id === user.id) {
+          currentUser.file_tools_enabled = toolsToggle.checked;
+          currentUser.workspace_root = rootInput.value.trim();
+          await applyAuthenticatedState(currentUser);
+        }
+      } catch (err) {
+        setAdminStatus(err.message || 'Update failed', true);
+      } finally {
+        saveBtn.disabled = false;
+      }
+    });
+    controls.appendChild(saveBtn);
+
     if (user.id !== currentUser.id) {
       const del = document.createElement('button');
       del.className = 'admin-del-btn';
@@ -1296,13 +1713,15 @@ function renderAdminUsers(users) {
           setAdminStatus(err.message || 'Delete failed', true);
         }
       });
-      row.appendChild(del);
+      controls.appendChild(del);
     } else {
       const selfTag = document.createElement('div');
       selfTag.className = 'admin-user-meta';
       selfTag.textContent = 'Current';
-      row.appendChild(selfTag);
+      controls.appendChild(selfTag);
     }
+
+    row.appendChild(controls);
 
     adminUsersEl.appendChild(row);
   }

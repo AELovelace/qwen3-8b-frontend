@@ -1,0 +1,45 @@
+# ds\_grid\_height
+
+This function will return the height of the given grid. This value is the number of cells the grid has along the y\-axis and is always an integer, as shown in the image below:
+
+ 
+
+#### Syntax:
+
+ds\_grid\_height(index)
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| index | [DS Grid](ds_grid_create.md) | This handle of the grid to find the height of. |
+
+ 
+
+#### Returns:
+
+[Real](../../../GML_Overview/Data_Types.md)
+
+ 
+
+#### Example:
+
+for (var i \= 0; i \< ds\_grid\_width(grid); \+\+i)  
+
+ {  
+
+     for (var j \= 0; j \< ds\_grid\_height(grid); \+\+j)  
+
+     {  
+
+         if (ds\_grid\_get(grid, i, j) \=\= 1\)  
+
+         {  
+
+             instance\_create\_Layer(i \* 32, j \* 32, "Walls", obj\_Wall);  
+
+         }  
+
+     }  
+
+ }
+
+The above code will loop through the DS grid indexed in the variable "grid" and if the value found in any specific cell is equal to 1, it will then create an instance of "obj\_Wall" at the appropriate position within the room.

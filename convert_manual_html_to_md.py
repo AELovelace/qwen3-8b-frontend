@@ -24,6 +24,15 @@ REMOVE_TAGS = {
     "svg",
     "object",
 }
+BOILERPLATE_HINTS = (
+    "footer",
+    "banner",
+    "buttons",
+    "breadcrumb",
+    "nav",
+    "navigation",
+    "toolbar",
+)
 
 
 def iter_html_files(root: Path) -> list[Path]:
@@ -60,13 +69,61 @@ def _rewrite_href_to_markdown(href: str) -> str:
     return f"{path_part}{query_part}{fragment_part}"
 
 
-def clean_and_convert_html(html_text: str) -> str:
+def _remove_boilerplate_nodes(soup: BeautifulSoup) -> None:
+    """Remove common navigation/footer wrappers from source HTML."""
+    for tag_name in ("footer", "nav"):
+        for node in soup.find_all(tag_name):
+            node.decompose()
+
+    for node in list(soup.find_all(True)):
+        if getattr(node, "attrs", None) is None:
+            continue
+        node_id = (node.get("id") or "").lower()
+        node_classes = " ".join(node.get("class") or []).lower()
+        label = f"{node_id} {node_classes}".strip()
+        if label and any(hint in label for hint in BOILERPLATE_HINTS):
+            node.decompose()
+
+
+def _post_clean_markdown(markdown: str, strip_images: bool, strip_boilerplate: bool) -> str:
+    """Post-process Markdown output to remove undesired artifacts."""
+    if strip_images:
+        markdown = re.sub(r"!\[[^\]]*\]\([^\)]+\)", "", markdown)
+
+    if strip_boilerplate:
+        cleaned_lines: list[str] = []
+        for raw_line in markdown.splitlines():
+            line = raw_line.strip()
+            lower = line.lower()
+            if lower.startswith(("back:", "next:", "previous:")):
+                continue
+            if "copyright" in lower:
+                continue
+            cleaned_lines.append(raw_line)
+        markdown = "\n".join(cleaned_lines)
+
+    return markdown
+
+
+def clean_and_convert_html(
+    html_text: str,
+    *,
+    strip_images: bool = False,
+    strip_boilerplate: bool = False,
+) -> str:
     """Convert one HTML document string to cleaned Markdown."""
     soup = BeautifulSoup(html_text, "html.parser")
 
     for tag_name in REMOVE_TAGS:
         for node in soup.find_all(tag_name):
             node.decompose()
+
+    if strip_images:
+        for node in soup.find_all("img"):
+            node.decompose()
+
+    if strip_boilerplate:
+        _remove_boilerplate_nodes(soup)
 
     for link in soup.find_all("a", href=True):
         link["href"] = _rewrite_href_to_markdown(link["href"])
@@ -84,11 +141,24 @@ def clean_and_convert_html(html_text: str) -> str:
     # Remove any raw HTML that might remain after conversion.
     markdown = re.sub(r"</?[^>\n]+>", "", markdown)
 
+    markdown = _post_clean_markdown(
+        markdown,
+        strip_images=strip_images,
+        strip_boilerplate=strip_boilerplate,
+    )
+
     markdown = re.sub(r"\n{3,}", "\n\n", markdown)
     return markdown.strip() + "\n"
 
 
-def convert_tree(input_dir: Path, output_dir: Path, overwrite: bool) -> tuple[int, int]:
+def convert_tree(
+    input_dir: Path,
+    output_dir: Path,
+    overwrite: bool,
+    *,
+    strip_images: bool,
+    strip_boilerplate: bool,
+) -> tuple[int, int]:
     """Convert all HTML files in input_dir and write Markdown to output_dir."""
     html_files = iter_html_files(input_dir)
     converted = 0
@@ -103,7 +173,11 @@ def convert_tree(input_dir: Path, output_dir: Path, overwrite: bool) -> tuple[in
             continue
 
         raw_html = src.read_text(encoding="utf-8", errors="ignore")
-        markdown = clean_and_convert_html(raw_html)
+        markdown = clean_and_convert_html(
+            raw_html,
+            strip_images=strip_images,
+            strip_boilerplate=strip_boilerplate,
+        )
 
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(markdown, encoding="utf-8")
@@ -133,6 +207,21 @@ def main() -> int:
         action="store_true",
         help="Overwrite Markdown files that already exist in output-dir.",
     )
+    parser.add_argument(
+        "--strip-images",
+        action="store_true",
+        help="Remove image content from generated Markdown.",
+    )
+    parser.add_argument(
+        "--strip-boilerplate",
+        action="store_true",
+        help="Remove common navigation/footer boilerplate from generated Markdown.",
+    )
+    parser.add_argument(
+        "--ai-clean",
+        action="store_true",
+        help="Enable AI-friendly cleanup (equivalent to --strip-images --strip-boilerplate).",
+    )
 
     args = parser.parse_args()
     input_dir = args.input_dir.resolve()
@@ -141,12 +230,23 @@ def main() -> int:
     if not input_dir.exists() or not input_dir.is_dir():
         raise SystemExit(f"Input directory does not exist or is not a directory: {input_dir}")
 
-    converted, skipped = convert_tree(input_dir, output_dir, overwrite=args.overwrite)
+    strip_images = args.strip_images or args.ai_clean
+    strip_boilerplate = args.strip_boilerplate or args.ai_clean
+
+    converted, skipped = convert_tree(
+        input_dir,
+        output_dir,
+        overwrite=args.overwrite,
+        strip_images=strip_images,
+        strip_boilerplate=strip_boilerplate,
+    )
 
     print(f"Input directory : {input_dir}")
     print(f"Output directory: {output_dir}")
     print(f"Converted files : {converted}")
     print(f"Skipped files   : {skipped}")
+    print(f"Strip images    : {strip_images}")
+    print(f"Strip boilerplate: {strip_boilerplate}")
     return 0
 
 

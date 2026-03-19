@@ -1,0 +1,43 @@
+# audio\_set\_master\_gain
+
+With this function you can set the absolute value for the global volume of all sounds and music for a specific listener.
+
+The default listener index is 0, but you can use the function [audio\_get\_listener\_info](Audio_Listeners/audio_get_listener_info.md) to get the different indices available for the target platform. The gain value is based on a linear scale from 0 (silent) to 1 (full volume) and will affect the relative volume of all sounds and music played from within your game through that listener.
+
+ 
+ 
+
+#### Syntax:
+
+audio\_set\_master\_gain(listenerIndex, gain)
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| listenerIndex | [Real](../../../../../GameMaker_Language/GML_Overview/Data_Types.md) or [Audio Listener ID](../../../../../GameMaker_Language/GML_Reference/Asset_Management/Audio/Audio_Listeners/Audio_Listeners.md) | The index of the listener to set the gain on. |
+| gain | [Real](../../../../../GameMaker_Language/GML_Overview/Data_Types.md) | Value for the global volume (0 to 1\). |
+
+ 
+
+#### Returns:
+
+N/A
+
+ 
+
+#### Example:
+
+var num \= audio\_get\_listener\_count();  
+
+ for (var i \= 0; i \< num; i\+\+)  
+
+ {  
+
+     var info \= audio\_get\_listener\_info(i);  
+
+     audio\_set\_master\_gain(info\[? "index"], 0\.75\);  
+
+     ds\_map\_destroy(info);  
+
+ }
+
+The above code loops through the available listeners and then sets their master gain to 0\.75\.
