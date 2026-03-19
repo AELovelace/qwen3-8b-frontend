@@ -1,0 +1,22 @@
+# title
+
+This action will clear all values from the given data structure. You must first select the type of data structure to clear and then give the index of the data structure (the index is the value that is returned and stored in a variable when you created the data structure originally). A cleared data structure is considered "empty" (ie: it has no entries), *except* grids. With grids this action will simply clear all the grid cells to 0\.
+
+  This does not free the data structure from memory and only clears it of any information. To free the memory assigned to the data structure you must use the action [Free Data Structure](Free_Data_Structure.md).
+
+ 
+
+#### Action Syntax:
+
+#### Arguments:
+
+| Argument | Description |
+| --- | --- |
+| Structure | The type of data structure you are clearing (List, Map, Grid or Stack) |
+| Variable | The variable holding the index of the data structure to clear |
+
+ 
+
+#### Example:
+
+The above action block code checks to see if the data structure referenced in the global variable is *not* empty, and if that is the case, the data structure is cleared.

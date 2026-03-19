@@ -1,0 +1,79 @@
+# Watches
+
+The whole idea of the Debugger is to permit you to "watch" every detail of your game. This is done using "watch windows" which, by default, are opened in [The Output Window](../../Introduction/The_Output_Window.md) docked at the bottom of the IDE. You can click on each of the different tabs to see the watches they contain, however they cannot be updated in real time (when real\-time debugging  is enabled from the Debugger toolbar) and will require the debugger to have paused the game.
+
+The **variables** that you're watching in any of the windows can be one of multiple **data types**. For a few of them GameMaker is able to provide more information about the variable's contents (its members or entries): [instances](../../GameMaker_Language/GML_Reference/Asset_Management/Instances/Instances.md), [structs](../../GameMaker_Language/GML_Overview/Structs.md), [arrays](../../GameMaker_Language/GML_Overview/Arrays.md) and [data structures](../../GameMaker_Language/GML_Reference/Data_Structures/Data_Structures.md). In this case the debugger shows a small  icon next to the variable name. Clicking it will expand the structure's contents, and you can also change some of the values for the variables shown by simply double\-clicking  on the value and giving it a new one.
+
+You cannot re\-assign arrays or data structures in this way, but you can change some of their contents (you cannot change the "key" values in maps, nor the priority value for priority queues).
+
+  [Macros and enums](../../GameMaker_Language/GML_Overview/Variables/Constants.md) cannot be evaluated as as their name is replaced by their value by the compiler; the names no longer exist at runtime.
+
+Below you can find a list of each of the different watch windows along with an explanation of what they are for and how to use them:
+
+[Locals](#)
+
+The **Locals** window shows the current step properties, which includes the name of the current event (or script) being run, the offset in the [Virtual Machine (VM)](#) code for the current script (the acronym "PC" is for "program counter"), the "self" instance running the code block, and the "other" instance in the event. This last part is only ever valid when the event is a *collision* event or there is a with used in the code. If the instance is in collision, "other" will show the other instance (and its variables) in the collision, but if it is a with then the "Self" instance becomes that which is running the code, while "Other" is then the instance that actually contains the with. At all other times, "Other" will simply show the same data as "Self".
+
+  The "Self" and "Other" instances can be expanded by clicking on  to see a list of all local and instance variables that are currently declared for the code block being stepped through.
+
+ 
+
+[Globals](#)
+
+The **Globals** window will show a list of all the currently declared **global** variables and their values.
+
+ 
+
+[Watches](#)
+
+This window is for you to add a specific variable that you want to keep track of. This can be a **global** or **instance** scope variable, a **built\-in** variable or even an **array** or **data structure**. If the instance code being stepped through has the watched variable it will be shown here, meaning you can easily keep track of a value without having to search for it in the **Locals** or **Globals** windows. If you right\-click  on a value you can **Delete Watch** or **Clear All**.
+
+ 
+
+[Instance](#)
+
+As the name implies, this window will show all **instance** variables, **local** variables for the instance event, **built\-in** variables, and **structs** associated with the instance currently being stepped through in the Source window (if an instance is being referenced using the keyword "other" or the with statement, then this window will show that instance's properties instead). If you right\-click  on a value you can add the variable to the **Watch** window using **Add Watch**.
+
+ 
+
+[All Instances](#)
+
+Should you need to see all instances that are currently in the room, you can select this window and they will be listed. You can also see the state of any **built\-in** variables, **instance** variables or **structs** that they have, and you can right\-click  on a value to add it to the **Watch** window using **Add Watch**.
+
+ 
+
+[Selected Instance](#)
+
+This window is for when you select an instance from your game. This is done by simply pausing the game and then clicking on any visible instance within the game window. The instance found under the mouse cursor will then have its information displayed in the Selected Instance window, where you can see its built\-in variables, instance variables, and structs the same as for the Instances window.
+
+ 
+
+[Render States](#)
+
+This watch shows you all the information available for the state of the current frame being [rendered](#), like the draw alpha or fill colour. This cannot be updated in real time so you will need to pause the game to update and get the frame details.
+
+ 
+
+[Surfaces / Textures](#)
+
+This watch enables you to see exactly what is being drawn to any **surfaces** you have in your game (including the application surface) as well as see the [texture page](#)s that are in memory. You can select from textures or surfaces from the menu at the bottom of the watch, and then mouse over the texture or surface ID to have it displayed in a pop\-up window:
+
+  The debugger must be **paused** before these will update.
+
+ 
+
+[Profile](#)
+
+This window is where you can see the current system **profile** for the game being tested and it's where you can check everything in your game from whole events to individual function calls to see how they are performing and spot any trouble areas or bottlenecks. For further information on profiling see the following page: 
+
+- [The Profiler](The_Profiler.md)
+
+ 
+
+[Buffer](#)
+
+If you have initialised any buffers in your game, then this window will show you the **buffer data**. You can select any buffer created by setting the **Buffer ID** value, which will start at 0 for the first buffer created in your game, and increment by 1 for each consecutive buffer: 
+
+If you right\-click  on the data window or click the **Data Display** button, you can select how the data is displayed, setting the *alignment* and *type*, and you can also set how the data is laid out from the **Column Select** box. There is a drop\-down window here where you can select from a default list of layouts.
+
+  You can set the alignment to 1\-byte Integer to get an exact view on the order of individual bytes in the buffer.

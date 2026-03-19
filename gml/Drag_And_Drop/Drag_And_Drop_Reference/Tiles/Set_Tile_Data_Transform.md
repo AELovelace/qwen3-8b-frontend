@@ -1,0 +1,20 @@
+# Set Tile Data Transform
+
+With this action you can change one of three tile transforms in the tile data. You supply the variable that holds the tile data for the tile, then select the transform to change. Clicking the "Apply" check\-box will apply that transform and un\-checking it will remove it. The tile data is simply a value that reflects the index of the tile along with the transforms applied as well as any custom tile masks that you have used, and this action permits you to change three of those values: Flip, mirror and rotate. Note that you will normally want to get the tile data first using either [Get Tile Data In Cell](Get_Tile_Data_In_Cell.md) or [Get Tile Data At Pixel](Get_Tile_Data_At_Pixel.md), then apply the required transform(s) and then set the tile in the tile map again using [Set Tile Data In Cell](Set_Tile_Data_In_Cell.md) or [Set Tile Data At Pixel](Set_Tile_Data_At_Pixel.md), since this action *only sets a value but does not apply it to the tile it was taken from*. For more information on tile data, please see the GML section on [Tile Map Functions](../../../GameMaker_Language/GML_Reference/Asset_Management/Rooms/Tile_Map_Layers/Tile_Map_Layers.md).
+
+ 
+
+#### Action Syntax:
+
+#### Arguments:
+
+| Argument | Description |
+| --- | --- |
+| Tile | The tile data for the tile to change |
+| Transform | The transform to apply/remove |
+
+ 
+
+#### Example:
+
+The above action block code gets the tile data at the mouse position and then checks to see if the tile has had a rotation transform applied to it. If it has then the transform is reset and the tile data sets the tile at the position again.

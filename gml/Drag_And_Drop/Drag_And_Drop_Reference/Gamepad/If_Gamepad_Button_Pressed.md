@@ -1,0 +1,27 @@
+# If Gamepad Button Pressed
+
+With this action you can poll a gamepad to see if any button is currently being pressed. The action will only return true during the step that the gamepad button is pressed down, and false afterwards, until the button is released and pressed again. If you click the not modifier you can then check to see if the button is *not* being pressed. If you need to check for a button being *held down*, then use the action [If Gamepad Button Down](If_Gamepad_Button_Down.md).
+
+If the button being checked is an analogue button, then the press will not be detected until the button value has gone above the threshold set using the action [Set Gamepad Button Threshold](Set_Gamepad_Button_Threshold.md).
+
+Note that to add actions into the "if" block, they should be dropped to the side of the action, as shown in the image below:
+
+These actions will now be run if the "if" evaluates to true, while any actions dropped elsewhere will be performed after the "if" block.
+
+ 
+
+#### Action Syntax:
+
+#### Arguments:
+
+| Argument | Description |
+| --- | --- |
+| Gamepad | The gamepad index. |
+| Button | The name of the button to check. |
+| Not | Negate the check (true becomes false and vice versa) |
+
+ 
+
+#### Example:
+
+The above action block code polls the button state of gamepad 0 every step and if a button is being held down it checks for the initial button down press. If the check is true on the initial down press, a sound is played, then, while the button is held down, the instance speed is set to 10\. If the button is not being held down, a check is done on the button release to reset the speed to 0 again.

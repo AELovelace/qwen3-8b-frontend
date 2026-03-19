@@ -16,8 +16,10 @@ A lightweight local chat application with:
 - Admin panel for creating/deleting users and generating invite tokens
 - Per-user conversation isolation
 - Streaming assistant responses with separate reasoning/thinking display
+- Markdown rendering in responses with syntax highlighting for code blocks
 - Optional web-search loop using `<search>...</search>` tags from the model
 - Long-term memory retrieval from older conversations when active context is truncated
+- Local GameMaker manual retrieval from `/gml/**/*.md` for GML-specific coding help
 - Auto-start attempt for `ollama serve` when Ollama is not running
 - Persistent settings for Brave API key in `config.json`
 
@@ -148,9 +150,12 @@ Chat request payload:
   "message": "user message",
   "model": "huihui_ai/qwen3-abliterated:8b",
   "think": true,
-  "use_search": true
+  "use_search": true,
+  "use_gml_docs": true
 }
 ```
+
+When `use_gml_docs` is enabled, the backend scans Markdown files under `gml/` at startup, chunks them for retrieval, and injects the most relevant GameMaker manual excerpts into the model prompt for each chat request.
 
 SSE event types include:
 
@@ -184,6 +189,28 @@ Triggers keep `messages_fts` in sync for inserts/deletes.
 
 - `server.py` - backend app, data layer, chat streaming, search loop
 - `index.html` - UI and browser-side app logic
+- `convert_manual_html_to_md.py` - converts manual HTML pages to Markdown
 - `requirements.txt` - Python dependencies
 - `memory.db` - runtime SQLite data (generated)
 - `config.json` - optional runtime settings (generated)
+
+## Convert GameMaker Manual To Markdown
+
+Use this script to convert all `.htm` and `.html` files under `gml/Manual` to `.md` files for AI ingestion:
+
+```bash
+python convert_manual_html_to_md.py --input-dir gml/Manual --output-dir gml/Manual_md --overwrite
+```
+
+For cleaner RAG/embedding text that strips images and common nav/footer boilerplate:
+
+```bash
+python convert_manual_html_to_md.py --input-dir gml/Manual --output-dir gml/Manual_md_ai --overwrite --ai-clean
+```
+
+Notes:
+
+- The converter mirrors the folder structure in the output directory.
+- Local links ending in `.htm`/`.html` are rewritten to `.md`.
+- Raw HTML tags are removed in the generated Markdown output.
+- `--ai-clean` is equivalent to `--strip-images --strip-boilerplate`.

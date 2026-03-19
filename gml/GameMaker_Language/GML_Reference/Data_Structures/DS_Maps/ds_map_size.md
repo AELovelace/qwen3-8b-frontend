@@ -1,0 +1,33 @@
+# ds\_map\_size
+
+With this function you can find how many key/values pairs the (previously created) DS map contains.
+
+ 
+
+#### Syntax:
+
+ds\_map\_size(id)
+
+| Argument | Type | Description |
+| --- | --- | --- |
+| id | [DS Map](ds_map_create.md) | The handle of the data structure to check. |
+
+ 
+
+#### Returns:
+
+[Real](../../../GML_Overview/Data_Types.md)
+
+ 
+
+#### Example:
+
+if (ds\_map\_size(inventory) \> 49\)  
+
+ {  
+
+     full \= true;  
+
+ }
+
+The above code will check the size of the DS map (ie: number of key/value pairs) and if it is greater than 49 it sets the variable "full" to true.
