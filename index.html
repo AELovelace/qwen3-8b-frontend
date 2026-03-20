@@ -125,7 +125,8 @@
     overflow-y: auto;
   }
   .setting-group label { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; display: block; }
-  .setting-group input {
+  .setting-group input,
+  .setting-group textarea {
     width: 100%;
     background: var(--surface2);
     border: 1px solid var(--border);
@@ -134,9 +135,12 @@
     padding: 6px 8px;
     font-size: 13px;
   }
-  .setting-group input:focus { outline: none; border-color: var(--accent); }
+  .setting-group input:focus,
+  .setting-group textarea:focus { outline: none; border-color: var(--accent); }
   #brave-save-btn,
-  #admin-create-invite-btn {
+  #admin-create-invite-btn,
+  #admin-persona-save-btn,
+  #open-admin-panel-btn {
     margin-top: 5px;
     width: 100%;
     background: var(--surface2);
@@ -149,7 +153,9 @@
     transition: border-color 0.15s, color 0.15s;
   }
   #brave-save-btn:hover,
-  #admin-create-invite-btn:hover { border-color: var(--accent); color: var(--text); }
+  #admin-create-invite-btn:hover,
+  #admin-persona-save-btn:hover,
+  #open-admin-panel-btn:hover { border-color: var(--accent); color: var(--text); }
   #brave-status { font-size: 11px; color: var(--text-dim); text-align: center; min-height: 14px; margin-top: 3px; }
 
   /* ── Main area ────────────────────────────────────────────────────── */
@@ -556,19 +562,111 @@
   }
   #logout-btn:hover { border-color: var(--accent); color: var(--text); }
 
-  #admin-panel {
+  #tooling-config-panel,
+  #tooling-config-host,
+  #admin-tooling-host {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  #admin-modal {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(0, 0, 0, 0.58);
+    z-index: 120;
+  }
+  #admin-modal.open { display: flex; }
+  body.admin-modal-open { overflow: hidden; }
+
+  #admin-modal-panel {
+    width: min(1080px, 96vw);
+    max-height: 92vh;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #admin-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  #admin-modal-title {
+    font-size: 14px;
+    color: var(--text);
+  }
+  #admin-modal-close-btn {
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text-dim);
+    border-radius: 6px;
+    width: 30px;
+    height: 30px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  #admin-modal-close-btn:hover {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+
+  #admin-modal-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    padding: 12px;
+    overflow: auto;
+  }
+  .admin-modal-col {
+    background: var(--surface2);
     border: 1px solid var(--border);
     border-radius: 8px;
-    background: var(--surface2);
-    padding: 8px;
-    display: none;
+    padding: 10px;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .admin-modal-col h4 {
+    font-size: 12px;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+
+  #admin-persona-input {
+    min-height: 120px;
+    resize: vertical;
+    font-family: inherit;
+    line-height: 1.45;
+  }
+  #admin-persona-status {
+    min-height: 14px;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+  }
+
+  #admin-panel {
+    display: flex;
     gap: 8px;
     flex-direction: column;
+    min-height: 0;
+    height: 100%;
   }
   #admin-panel h3 { font-size: 12px; color: var(--text); }
   #admin-status { min-height: 14px; font-size: 11px; color: var(--text-dim); }
   #admin-users {
-    max-height: 140px;
+    flex: 1;
+    min-height: 170px;
     overflow-y: auto;
     border-top: 1px solid var(--border);
     margin-top: 4px;
@@ -646,6 +744,8 @@
       border-bottom: 1px solid var(--border);
     }
     #main { min-height: 55vh; }
+    #admin-modal { padding: 12px; }
+    #admin-modal-body { grid-template-columns: 1fr; }
   }
 
   /* ── Code blocks (markdown) ────────────────────────────────────────── */
@@ -769,6 +869,54 @@
       <button id="new-chat-btn">+ New Chat</button>
     </div>
     <div id="conv-list"></div>
+    <div id="tools-rail-header">Workspace Tools</div>
+    <div id="tools-rail-body">
+      <div id="account-box">
+        <div id="account-role">User</div>
+        <div id="account-line">Signed in as <strong id="account-username">-</strong></div>
+        <button id="open-admin-panel-btn" type="button" style="display:none;">Open Admin Panel</button>
+        <button id="logout-btn" type="button">Log out</button>
+      </div>
+
+      <div id="tooling-config-host">
+        <div id="tooling-config-panel">
+          <div class="setting-group">
+            <label for="model-input">Model</label>
+            <input id="model-input" type="text" value="huihui_ai/qwen3-abliterated:8b" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="setting-group">
+            <label for="gml-docs-toggle">GameMaker Manual</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="gml-docs-toggle" type="checkbox" checked />
+              Use local /indexed-docs/gml markdown for GML guidance
+            </label>
+            <div id="gml-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="ps-docs-toggle">PowerShell Docs</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="ps-docs-toggle" type="checkbox" checked />
+              Use local /indexed-docs/ps-docs markdown for PowerShell guidance
+            </label>
+            <div id="ps-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="file-tools-toggle">Agent File Tools</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="file-tools-toggle" type="checkbox" />
+              Allow model to read/edit local files
+            </label>
+            <div id="file-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="brave-key-input">Brave Search API Key</label>
+            <input id="brave-key-input" type="password" placeholder="Paste key here…" autocomplete="off" />
+            <button id="brave-save-btn">Save Key</button>
+            <div id="brave-status"></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </aside>
 
   <!-- ── Main ──────────────────────────────────────────────────────── -->
@@ -801,59 +949,48 @@
 
   <!-- ── Right rail: Admin and tools ───────────────────────────────── -->
   <aside id="tools-rail">
-    <div id="tools-rail-header">Workspace Tools</div>
-    <div id="tools-rail-body">
-      <div id="account-box">
-        <div id="account-role">User</div>
-        <div id="account-line">Signed in as <strong id="account-username">-</strong></div>
-        <button id="logout-btn" type="button">Log out</button>
-      </div>
+    
+  </aside>
 
-      <div id="admin-panel">
-        <h3>Admin: User Access</h3>
-        <div class="setting-group">
-          <label for="admin-new-username">New Username</label>
-          <input id="admin-new-username" type="text" autocomplete="off" />
-        </div>
-        <div class="setting-group">
-          <label for="admin-new-password">New Password</label>
-          <input id="admin-new-password" type="password" autocomplete="off" />
-        </div>
-        <button id="admin-create-user-btn" class="auth-btn" type="button">Create User</button>
-        <button id="admin-create-invite-btn" type="button">Generate Invite Token</button>
-        <div id="admin-invite-token" style="font-size:11px;color:var(--text-dim);word-break:break-all;"></div>
-        <div id="admin-status"></div>
-        <div id="admin-users"></div>
+  <div id="admin-modal" aria-hidden="true">
+    <div id="admin-modal-panel" role="dialog" aria-modal="true" aria-labelledby="admin-modal-title">
+      <div id="admin-modal-header">
+        <h3 id="admin-modal-title">Admin Control Panel</h3>
+        <button id="admin-modal-close-btn" type="button" aria-label="Close admin panel">✕</button>
       </div>
+      <div id="admin-modal-body">
+        <section class="admin-modal-col">
+          <h4>Tooling and Model</h4>
+          <div class="setting-group">
+            <label for="admin-persona-input">System Persona Prompt</label>
+            <textarea id="admin-persona-input" spellcheck="false" placeholder="Define your AI persona prompt here. It applies to the next response."></textarea>
+            <button id="admin-persona-save-btn" type="button">Save Persona</button>
+            <div id="admin-persona-status"></div>
+          </div>
+          <div id="admin-tooling-host"></div>
+        </section>
 
-      <div class="setting-group">
-        <label for="model-input">Model</label>
-        <input id="model-input" type="text" value="huihui_ai/qwen3-abliterated:8b" autocomplete="off" spellcheck="false" />
-      </div>
-      <div class="setting-group">
-        <label for="gml-docs-toggle">GameMaker Manual</label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-          <input id="gml-docs-toggle" type="checkbox" checked />
-          Use local /gml markdown for GML advice
-        </label>
-        <div id="gml-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
-      </div>
-      <div class="setting-group">
-        <label for="file-tools-toggle">Agent File Tools</label>
-        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-          <input id="file-tools-toggle" type="checkbox" />
-          Allow model to read/edit local files
-        </label>
-        <div id="file-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
-      </div>
-      <div class="setting-group">
-        <label for="brave-key-input">Brave Search API Key</label>
-        <input id="brave-key-input" type="password" placeholder="Paste key here…" autocomplete="off" />
-        <button id="brave-save-btn">Save Key</button>
-        <div id="brave-status"></div>
+        <section class="admin-modal-col">
+          <div id="admin-panel">
+            <h3>User Management</h3>
+            <div class="setting-group">
+              <label for="admin-new-username">New Username</label>
+              <input id="admin-new-username" type="text" autocomplete="off" />
+            </div>
+            <div class="setting-group">
+              <label for="admin-new-password">New Password</label>
+              <input id="admin-new-password" type="password" autocomplete="off" />
+            </div>
+            <button id="admin-create-user-btn" class="auth-btn" type="button">Create User</button>
+            <button id="admin-create-invite-btn" type="button">Generate Invite Token</button>
+            <div id="admin-invite-token" style="font-size:11px;color:var(--text-dim);word-break:break-all;"></div>
+            <div id="admin-status"></div>
+            <div id="admin-users"></div>
+          </div>
+        </section>
       </div>
     </div>
-  </aside>
+  </div>
 </div>
 
 <script>
@@ -880,6 +1017,8 @@ const sendBtn = document.getElementById('send-btn');
 const modelInput = document.getElementById('model-input');
 const gmlDocsToggle = document.getElementById('gml-docs-toggle');
 const gmlStatusEl = document.getElementById('gml-status');
+const psDocsToggle = document.getElementById('ps-docs-toggle');
+const psStatusEl = document.getElementById('ps-status');
 const fileToolsToggle = document.getElementById('file-tools-toggle');
 const fileToolsStatusEl = document.getElementById('file-tools-status');
 const newChatBtn = document.getElementById('new-chat-btn');
@@ -887,6 +1026,16 @@ const newChatBtn = document.getElementById('new-chat-btn');
 const accountUsernameEl = document.getElementById('account-username');
 const accountRoleEl = document.getElementById('account-role');
 const logoutBtn = document.getElementById('logout-btn');
+const openAdminPanelBtn = document.getElementById('open-admin-panel-btn');
+
+const toolingConfigHostEl = document.getElementById('tooling-config-host');
+const toolingConfigPanelEl = document.getElementById('tooling-config-panel');
+const adminModalEl = document.getElementById('admin-modal');
+const adminModalCloseBtn = document.getElementById('admin-modal-close-btn');
+const adminToolingHostEl = document.getElementById('admin-tooling-host');
+const adminPersonaInputEl = document.getElementById('admin-persona-input');
+const adminPersonaSaveBtn = document.getElementById('admin-persona-save-btn');
+const adminPersonaStatusEl = document.getElementById('admin-persona-status');
 
 const adminPanelEl = document.getElementById('admin-panel');
 const adminUsersEl = document.getElementById('admin-users');
@@ -914,6 +1063,11 @@ function setAuthToken(token) {
 function showAuthGate(message = '') {
   appEl.style.display = 'none';
   authGateEl.style.display = 'flex';
+  closeAdminModal();
+  openAdminPanelBtn.style.display = 'none';
+  if (toolingConfigPanelEl.parentElement !== toolingConfigHostEl) {
+    toolingConfigHostEl.appendChild(toolingConfigPanelEl);
+  }
   authStatusEl.textContent = message;
   authStatusEl.style.color = message ? 'var(--text)' : 'var(--text-dim)';
 }
@@ -958,12 +1112,70 @@ async function apiFetch(url, options = {}) {
   return res;
 }
 
+function closeAdminModal() {
+  adminModalEl.classList.remove('open');
+  adminModalEl.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('admin-modal-open');
+}
+
+function openAdminModal() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+  adminModalEl.classList.add('open');
+  adminModalEl.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('admin-modal-open');
+}
+
+function setAdminPersonaStatus(message, isError = false) {
+  adminPersonaStatusEl.textContent = message;
+  adminPersonaStatusEl.style.color = isError ? 'var(--error)' : 'var(--text-dim)';
+}
+
+async function saveAdminPersonaPrompt() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+  adminPersonaSaveBtn.disabled = true;
+  setAdminPersonaStatus('Saving persona prompt...');
+  try {
+    const res = await apiFetch('/api/admin/persona', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ persona_prompt: adminPersonaInputEl.value }),
+    });
+    const data = await res.json();
+    currentUser.persona_prompt = data.persona_prompt || '';
+    adminPersonaInputEl.value = currentUser.persona_prompt;
+    setAdminPersonaStatus('Persona updated. Applies to your next response.');
+  } catch (err) {
+    setAdminPersonaStatus(err.message || 'Could not save persona prompt', true);
+  } finally {
+    adminPersonaSaveBtn.disabled = false;
+  }
+}
+
 /* ── App bootstrap/auth actions ─────────────────────────────────────── */
 async function applyAuthenticatedState(user) {
   currentUser = user;
+  const isAdmin = user.role === 'admin';
+
   accountUsernameEl.textContent = user.username;
   accountRoleEl.textContent = user.role;
-  adminPanelEl.style.display = user.role === 'admin' ? 'flex' : 'none';
+  openAdminPanelBtn.style.display = isAdmin ? 'block' : 'none';
+  adminPanelEl.style.display = isAdmin ? 'flex' : 'none';
+
+  if (isAdmin) {
+    adminPersonaInputEl.value = user.persona_prompt || '';
+    setAdminPersonaStatus('');
+    if (toolingConfigPanelEl.parentElement !== adminToolingHostEl) {
+      adminToolingHostEl.appendChild(toolingConfigPanelEl);
+    }
+  } else {
+    adminPersonaInputEl.value = '';
+    setAdminPersonaStatus('');
+    closeAdminModal();
+    if (toolingConfigPanelEl.parentElement !== toolingConfigHostEl) {
+      toolingConfigHostEl.appendChild(toolingConfigPanelEl);
+    }
+  }
+
   if (user.file_tools_enabled) {
     fileToolsToggle.disabled = false;
     fileToolsStatusEl.style.color = 'var(--accent)';
@@ -975,9 +1187,11 @@ async function applyAuthenticatedState(user) {
     fileToolsStatusEl.style.color = 'var(--text-dim)';
     fileToolsStatusEl.textContent = 'Disabled for your account. Ask an admin to enable access.';
   }
-  if (user.role === 'admin') {
+
+  if (isAdmin) {
     await loadAdminUsers();
   }
+
   showApp();
   clearMessages();
   await Promise.all([loadConversations(), loadBraveStatus()]);
@@ -1049,6 +1263,7 @@ function logout(message = 'Logged out') {
   activeConvId = null;
   convListEl.innerHTML = '';
   clearMessages();
+  closeAdminModal();
   showAuthGate(message);
 }
 
@@ -1186,12 +1401,12 @@ function appendUserMessage(text) {
 }
 
 function renderMarkdown(text) {
-  if (!window.marked) return text;
+  if (!window.marked) return null;
   try {
     return marked.parse(text);
   } catch (e) {
     console.error('Markdown parsing error:', e);
-    return text;
+    return null;
   }
 }
 
@@ -1206,7 +1421,21 @@ function highlightCode(element) {
   });
 }
 
-function appendAssistantMessage(initialContent = '', initialThinking = '', withCursor = false, showFts = false, searchCount = 0, gmlCount = 0, toolCount = 0) {
+function renderAssistantBubble(bubble, rawText) {
+  const markdownSource = String(rawText ?? '');
+  bubble.dataset.rawMarkdown = markdownSource;
+
+  const rendered = renderMarkdown(markdownSource);
+  if (rendered === null) {
+    bubble.textContent = markdownSource;
+    return;
+  }
+
+  bubble.innerHTML = rendered;
+  highlightCode(bubble);
+}
+
+function appendAssistantMessage(initialContent = '', initialThinking = '', withCursor = false, showFts = false, searchCount = 0, gmlCount = 0, psCount = 0, toolCount = 0) {
   hideEmpty();
   const row = document.createElement('div');
   row.className = 'msg-row assistant';
@@ -1236,6 +1465,11 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   gmlEl.textContent = `GML manual: ${gmlCount} snippet${gmlCount !== 1 ? 's' : ''}`;
   gmlEl.style.display = gmlCount > 0 ? 'inline-flex' : 'none';
 
+  const psEl = document.createElement('span');
+  psEl.className = 'meta-badge';
+  psEl.textContent = `PS docs: ${psCount} snippet${psCount !== 1 ? 's' : ''}`;
+  psEl.style.display = psCount > 0 ? 'inline-flex' : 'none';
+
   const toolsEl = document.createElement('span');
   toolsEl.className = 'meta-badge';
   toolsEl.textContent = `🔧 ${toolCount} tool call${toolCount !== 1 ? 's' : ''}`;
@@ -1244,6 +1478,7 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   badgeRow.appendChild(ftsEl);
   badgeRow.appendChild(webEl);
   badgeRow.appendChild(gmlEl);
+  badgeRow.appendChild(psEl);
   badgeRow.appendChild(toolsEl);
   body.appendChild(badgeRow);
 
@@ -1280,15 +1515,15 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble' + (withCursor ? ' cursor' : '');
+  bubble.dataset.rawMarkdown = '';
   if (initialContent) {
-    bubble.innerHTML = renderMarkdown(initialContent);
+    renderAssistantBubble(bubble, initialContent);
   }
 
   body.appendChild(bubble);
   row.appendChild(av);
   row.appendChild(body);
   messagesEl.appendChild(row);
-  highlightCode(bubble);
   scrollToBottom();
 
   return {
@@ -1299,6 +1534,7 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
     ftsEl,
     webEl,
     gmlEl,
+    psEl,
     toolsEl,
     searchIndicatorsEl,
     toolIndicatorsEl,
@@ -1333,6 +1569,7 @@ async function handleSend() {
     ftsEl,
     webEl,
     gmlEl,
+    psEl,
     toolsEl,
     searchIndicatorsEl,
     toolIndicatorsEl,
@@ -1342,6 +1579,7 @@ async function handleSend() {
 
   let hasThinking = false;
   let hasContent = false;
+  let assistantRawContent = '';
   let searchesDone = 0;
   let toolsDone = 0;
   const activeSearchEls = new Map();
@@ -1381,6 +1619,7 @@ async function handleSend() {
         think: true,
         use_search: true,
         use_gml_docs: gmlDocsToggle.checked,
+        use_ps_docs: psDocsToggle.checked,
         use_file_tools: fileToolsToggle.checked,
       }),
       throwOnError: false,
@@ -1431,9 +1670,8 @@ async function handleSend() {
             if (hasThinking) details.open = false;
             hasContent = true;
           }
-          contentBubble.textContent += evt.delta;
-          contentBubble.innerHTML = renderMarkdown(contentBubble.textContent);
-          highlightCode(contentBubble);
+          assistantRawContent += evt.delta;
+          renderAssistantBubble(contentBubble, assistantRawContent);
           scrollToBottom();
 
         } else if (evt.type === 'search_start') {
@@ -1468,6 +1706,10 @@ async function handleSend() {
           if (evt.gml_used) {
             gmlEl.textContent = `GML manual: ${evt.gml_snippet_count} snippet${evt.gml_snippet_count !== 1 ? 's' : ''}`;
             gmlEl.style.display = 'inline-flex';
+          }
+          if (evt.ps_docs_used) {
+            psEl.textContent = `PS docs: ${evt.ps_docs_snippet_count} snippet${evt.ps_docs_snippet_count !== 1 ? 's' : ''}`;
+            psEl.style.display = 'inline-flex';
           }
           if (evt.searches_done > 0) {
             searchesDone = evt.searches_done;
@@ -1573,6 +1815,7 @@ async function loadBraveStatus() {
   try {
     const res = await apiFetch('/api/settings');
     const data = await res.json();
+
     if (data.brave_api_key_set) {
       braveStatusEl.textContent = `Key saved (${data.brave_api_key_masked})`;
       braveStatusEl.style.color = 'var(--accent)';
@@ -1582,23 +1825,39 @@ async function loadBraveStatus() {
     }
 
     if (data.gml_docs_enabled) {
-      let statusText = `Indexed ${data.gml_docs_file_count} files into ${data.gml_docs_chunk_count} retrieval chunks`;
+      let gmlStatusText = `Indexed ${data.gml_docs_file_count} files into ${data.gml_docs_chunk_count} retrieval chunks`;
       if (data.gml_embeddings_enabled) {
-        statusText += ` • Using semantic search (${data.gml_embeddings_model})`;
+        gmlStatusText += ` • Using semantic search (${data.gml_embeddings_model})`;
       } else if (data.gml_embeddings_building) {
-        statusText += ' • Building semantic index…';
+        gmlStatusText += ' • Building semantic index…';
       }
-      gmlStatusEl.textContent = statusText;
+      gmlStatusEl.textContent = gmlStatusText;
       gmlStatusEl.style.color = 'var(--accent)';
     } else {
-      gmlStatusEl.textContent = data.gml_docs_error || 'No /gml markdown index available';
+      gmlStatusEl.textContent = data.gml_docs_error || 'No /indexed-docs/gml markdown index available';
       gmlStatusEl.style.color = 'var(--error)';
+    }
+
+    if (data.ps_docs_enabled) {
+      let psStatusText = `Indexed ${data.ps_docs_file_count} files into ${data.ps_docs_chunk_count} retrieval chunks`;
+      if (data.ps_embeddings_enabled) {
+        psStatusText += ` • Using semantic search (${data.ps_embeddings_model})`;
+      } else if (data.ps_embeddings_building) {
+        psStatusText += ' • Building semantic index…';
+      }
+      psStatusEl.textContent = psStatusText;
+      psStatusEl.style.color = 'var(--accent)';
+    } else {
+      psStatusEl.textContent = data.ps_docs_error || 'No /indexed-docs/ps-docs markdown index available';
+      psStatusEl.style.color = 'var(--error)';
     }
   } catch {
     braveStatusEl.textContent = 'Could not load key status';
     braveStatusEl.style.color = 'var(--error)';
     gmlStatusEl.textContent = 'Could not load GML index status';
     gmlStatusEl.style.color = 'var(--error)';
+    psStatusEl.textContent = 'Could not load PowerShell docs index status';
+    psStatusEl.style.color = 'var(--error)';
   }
 }
 
@@ -1778,6 +2037,19 @@ tabSignupEl.addEventListener('click', () => switchAuthTab('signup'));
 loginFormEl.addEventListener('submit', handleLoginSubmit);
 signupFormEl.addEventListener('submit', handleSignupSubmit);
 logoutBtn.addEventListener('click', () => logout('Logged out successfully.'));
+openAdminPanelBtn.addEventListener('click', openAdminModal);
+adminModalCloseBtn.addEventListener('click', closeAdminModal);
+adminModalEl.addEventListener('click', event => {
+  if (event.target === adminModalEl) {
+    closeAdminModal();
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && adminModalEl.classList.contains('open')) {
+    closeAdminModal();
+  }
+});
+adminPersonaSaveBtn.addEventListener('click', saveAdminPersonaPrompt);
 
 /* ── Init ───────────────────────────────────────────────────────────── */
 (async () => {

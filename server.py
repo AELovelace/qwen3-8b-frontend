@@ -44,22 +44,26 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-OLLAMA_URL        = "http://localhost:11434/api/chat"
+OLLAMA_URL        = "http://127.0.0.1:11434/api/chat"
 OLLAMA_HEALTH_URL = "http://127.0.0.1:11434/api/tags"
 BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
-DEFAULT_MODEL     = "huihui_ai/qwen3-abliterated:8b"
+DEFAULT_MODEL     = "goekdenizguelmez/JOSIEFIED-Qwen3:8b"
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
 CONFIG_PATH       = Path(__file__).parent / "config.json"
-GML_DOCS_ROOT     = Path(__file__).parent / "gml"
+INDEXED_DOCS_ROOT = Path(__file__).parent / "indexed-docs"
+GML_DOCS_ROOT     = INDEXED_DOCS_ROOT / "gml"
+PS_DOCS_ROOT      = INDEXED_DOCS_ROOT / "ps-docs"
 GML_EMBEDDINGS_DB = Path(__file__).parent / "gml_embeddings"
+PS_EMBEDDINGS_DB  = Path(__file__).parent / "ps_docs_embeddings"
 TOKEN_CAP              = 20_000  # max tokens kept in active context
 FTS_RESULT_LIMIT       = 3       # past-memory snippets to inject when truncated
 TOKEN_ESTIMATE_DIVISOR = 4       # chars / 4 ≈ tokens
 MAX_SEARCH_ITERATIONS  = 3       # max Brave searches per response
 BRAVE_SEARCH_COUNT     = 5       # results to fetch per query
-GML_RESULT_LIMIT       = 4       # local GML manual snippets to inject
-GML_CHUNK_CHAR_LIMIT   = 1_400   # target chunk size for manual retrieval
+GML_RESULT_LIMIT       = 4       # local GML snippets to inject
+PS_RESULT_LIMIT        = 4       # local PowerShell snippets to inject
+GML_CHUNK_CHAR_LIMIT   = 1_400   # target chunk size for docs retrieval
 JWT_ALGORITHM          = "HS256"
 ACCESS_TOKEN_HOURS     = 24
 
@@ -81,6 +85,13 @@ GML_SYSTEM_PROMPT = (
     "and provide practical code examples when useful. "
     "If local GameMaker manual excerpts are provided, use them as your primary source. "
     "If the excerpts do not fully answer the question, say what is missing instead of inventing APIs or behavior."
+)
+
+PS_SYSTEM_PROMPT = (
+    "You are assisting with PowerShell scripting and automation. "
+    "Prefer accurate PowerShell terminology and explain shell-specific behavior clearly. "
+    "If local PowerShell docs excerpts are provided, use them as your primary source. "
+    "If the excerpts do not fully answer the question, say what is missing instead of inventing commands, parameters, or behavior."
 )
 
 FILE_TOOLS_SYSTEM_PROMPT = (
@@ -118,12 +129,17 @@ async def lifespan(app: FastAPI):
         await db.close()
 
     await ensure_gml_index_loaded(force=True)
-    app.state.embeddings_ready = False
-    app.state.embeddings_building = CHROMADB_AVAILABLE
+    await ensure_ps_index_loaded(force=True)
+    app.state.gml_embeddings_ready = False
+    app.state.gml_embeddings_building = CHROMADB_AVAILABLE
+    app.state.ps_embeddings_ready = False
+    app.state.ps_embeddings_building = CHROMADB_AVAILABLE
     if CHROMADB_AVAILABLE:
         get_or_init_embedding_model()
-        get_or_init_chroma_client()
-        asyncio.create_task(_build_embeddings_background())
+        get_or_init_chroma_client("gml")
+        get_or_init_chroma_client("ps")
+        asyncio.create_task(_build_gml_embeddings_background())
+        asyncio.create_task(_build_ps_embeddings_background())
     log.info("Database initialised at %s", DB_PATH)
     yield
 
@@ -131,6 +147,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Ollama Qwen3 Chat", lifespan=lifespan)
 _ollama_start_lock = asyncio.Lock()
 _gml_index_lock = asyncio.Lock()
+_ps_index_lock = asyncio.Lock()
 _auth_scheme = HTTPBearer(auto_error=False)
 _pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -140,7 +157,8 @@ _pending_approvals_lock = asyncio.Lock()
 
 # Embeddings model (lazy-loaded)
 _embedding_model: SentenceTransformerEmbeddingFunction | None = None
-_chroma_client = None  # chromadb.PersistentClient, typed loosely to avoid import quirks
+_gml_chroma_client = None  # chromadb.PersistentClient, typed loosely to avoid import quirks
+_ps_chroma_client = None   # chromadb.PersistentClient, typed loosely to avoid import quirks
 
 # ---------------------------------------------------------------------------
 # Database
@@ -157,6 +175,7 @@ _DDL_STATEMENTS = [
         is_active           INTEGER NOT NULL DEFAULT 1,
         file_tools_enabled  INTEGER NOT NULL DEFAULT 0,
         workspace_root      TEXT NOT NULL DEFAULT '',
+        persona_prompt      TEXT NOT NULL DEFAULT '',
         created_at          TEXT NOT NULL
     )
     """,
@@ -291,7 +310,7 @@ async def ensure_conversations_user_column(db: aiosqlite.Connection) -> None:
 
 
 async def ensure_user_tools_columns(db: aiosqlite.Connection) -> None:
-    """Migrate users table to add file tools columns if missing."""
+    """Migrate users table to add per-user tooling/profile columns if missing."""
     cursor = await db.execute("PRAGMA table_info(users)")
     rows = await cursor.fetchall()
     cols = {row["name"] for row in rows}
@@ -299,6 +318,8 @@ async def ensure_user_tools_columns(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE users ADD COLUMN file_tools_enabled INTEGER NOT NULL DEFAULT 0")
     if "workspace_root" not in cols:
         await db.execute("ALTER TABLE users ADD COLUMN workspace_root TEXT NOT NULL DEFAULT ''")
+    if "persona_prompt" not in cols:
+        await db.execute("ALTER TABLE users ADD COLUMN persona_prompt TEXT NOT NULL DEFAULT ''")
     await db.commit()
 
 
@@ -411,7 +432,7 @@ async def get_current_user(
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, created_at FROM users WHERE id=?",
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users WHERE id=?",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -512,6 +533,7 @@ class ChatRequest(BaseModel):
     think: bool = True
     use_search: bool = True
     use_gml_docs: bool = True
+    use_ps_docs: bool = False
     use_file_tools: bool = False
 
 
@@ -538,6 +560,10 @@ class AdminCreateUserRequest(BaseModel):
 
 class AdminCreateInviteRequest(BaseModel):
     expires_in_days: int = 7
+
+
+class AdminPersonaUpdateRequest(BaseModel):
+    persona_prompt: str = ""
 
 
 class CommandApprovalRequest(BaseModel):
@@ -639,7 +665,7 @@ def chunk_gml_section(heading: str, content: str, limit: int = GML_CHUNK_CHAR_LI
     return chunks
 
 
-def build_gml_index(root: Path) -> dict:
+def build_gml_index(root: Path, source_label: str = "GML") -> dict:
     stats = {
         "enabled": root.exists(),
         "root": str(root),
@@ -650,7 +676,7 @@ def build_gml_index(root: Path) -> dict:
         "error": "",
     }
     if not root.exists():
-        stats["error"] = f"GML docs folder not found: {root}"
+        stats["error"] = f"{source_label} docs folder not found: {root}"
         return stats
 
     chunks: list[dict] = []
@@ -658,7 +684,7 @@ def build_gml_index(root: Path) -> dict:
         try:
             raw_text = md_path.read_text(encoding="utf-8", errors="ignore")
         except Exception as exc:
-            log.warning("Failed to read GML doc %s: %s", md_path, exc)
+            log.warning("Failed to read %s doc %s: %s", source_label, md_path, exc)
             continue
 
         rel_path = md_path.relative_to(root.parent).as_posix()
@@ -693,16 +719,38 @@ async def ensure_gml_index_loaded(force: bool = False) -> dict:
         if current_index is not None and not force:
             return current_index
 
-        gml_index = build_gml_index(GML_DOCS_ROOT)
+        gml_index = build_gml_index(GML_DOCS_ROOT, source_label="GML")
         app.state.gml_index = gml_index
         log.info(
-            "GML doc index ready: %d files, %d chunks",
+            "GML docs index ready: %d files, %d chunks",
             gml_index.get("file_count", 0),
             gml_index.get("chunk_count", 0),
         )
         if gml_index.get("error"):
-            log.warning("GML doc index warning: %s", gml_index["error"])
+            log.warning("GML docs index warning: %s", gml_index["error"])
         return gml_index
+
+
+async def ensure_ps_index_loaded(force: bool = False) -> dict:
+    current_index = getattr(app.state, "ps_index", None)
+    if current_index is not None and not force:
+        return current_index
+
+    async with _ps_index_lock:
+        current_index = getattr(app.state, "ps_index", None)
+        if current_index is not None and not force:
+            return current_index
+
+        ps_index = build_gml_index(PS_DOCS_ROOT, source_label="PowerShell")
+        app.state.ps_index = ps_index
+        log.info(
+            "PowerShell docs index ready: %d files, %d chunks",
+            ps_index.get("file_count", 0),
+            ps_index.get("chunk_count", 0),
+        )
+        if ps_index.get("error"):
+            log.warning("PowerShell docs index warning: %s", ps_index["error"])
+        return ps_index
 
 
 def get_or_init_embedding_model() -> SentenceTransformerEmbeddingFunction | None:
@@ -721,39 +769,55 @@ def get_or_init_embedding_model() -> SentenceTransformerEmbeddingFunction | None
     return _embedding_model
 
 
-def get_or_init_chroma_client():
-    global _chroma_client
+def get_or_init_chroma_client(kind: str):
+    global _gml_chroma_client, _ps_chroma_client
+
     if not CHROMADB_AVAILABLE:
         return None
-    if _chroma_client is None:
-        try:
-            GML_EMBEDDINGS_DB.mkdir(parents=True, exist_ok=True)
-            _chroma_client = chromadb.PersistentClient(path=str(GML_EMBEDDINGS_DB))
-            log.info("Chroma persistent client initialized at %s", GML_EMBEDDINGS_DB)
-        except Exception as exc:
-            log.error("Failed to initialize Chroma client: %s", exc)
-            return None
-    return _chroma_client
+
+    if kind == "gml":
+        if _gml_chroma_client is None:
+            try:
+                GML_EMBEDDINGS_DB.mkdir(parents=True, exist_ok=True)
+                _gml_chroma_client = chromadb.PersistentClient(path=str(GML_EMBEDDINGS_DB))
+                log.info("GML Chroma persistent client initialized at %s", GML_EMBEDDINGS_DB)
+            except Exception as exc:
+                log.error("Failed to initialize GML Chroma client: %s", exc)
+                return None
+        return _gml_chroma_client
+
+    if kind == "ps":
+        if _ps_chroma_client is None:
+            try:
+                PS_EMBEDDINGS_DB.mkdir(parents=True, exist_ok=True)
+                _ps_chroma_client = chromadb.PersistentClient(path=str(PS_EMBEDDINGS_DB))
+                log.info("PowerShell Chroma persistent client initialized at %s", PS_EMBEDDINGS_DB)
+            except Exception as exc:
+                log.error("Failed to initialize PowerShell Chroma client: %s", exc)
+                return None
+        return _ps_chroma_client
+
+    return None
 
 
-def _chromadb_build_sync(chunks: list[dict]) -> dict:
-    """Synchronous chromadb upsert — intended for thread-pool execution.
-
-    Skips the full rebuild when a persisted collection already contains the
-    exact same number of chunks (i.e. the GML docs haven't changed since the
-    last run).  Delete GML_EMBEDDINGS_DB to force a full rebuild.
-    """
+def _chromadb_build_sync(
+    chunks: list[dict],
+    *,
+    collection_name: str,
+    source_label: str,
+    client_kind: str,
+) -> dict:
+    """Synchronous chromadb upsert — intended for thread-pool execution."""
     embedding_fn = get_or_init_embedding_model()
-    client = get_or_init_chroma_client()
+    client = get_or_init_chroma_client(client_kind)
     if not embedding_fn or not client:
         return {
             "enabled": False,
             "error": "Failed to initialize embeddings or Chroma client",
             "chunk_count": 0,
         }
-    collection_name = "gml_docs"
+
     try:
-        # Check if a valid cached collection already exists.
         existing = client.get_or_create_collection(
             name=collection_name,
             embedding_function=embedding_fn,
@@ -761,14 +825,15 @@ def _chromadb_build_sync(chunks: list[dict]) -> dict:
         )
         if existing.count() == len(chunks):
             log.info(
-                "GML embeddings cache hit: %d chunks already indexed, skipping rebuild",
+                "%s embeddings cache hit: %d chunks already indexed, skipping rebuild",
+                source_label,
                 len(chunks),
             )
             return {"enabled": True, "chunk_count": len(chunks), "collection_name": collection_name}
 
-        # Count mismatch — docs changed, rebuild from scratch.
         log.info(
-            "GML embeddings cache miss (%d stored vs %d current), rebuilding…",
+            "%s embeddings cache miss (%d stored vs %d current), rebuilding…",
+            source_label,
             existing.count(),
             len(chunks),
         )
@@ -778,6 +843,7 @@ def _chromadb_build_sync(chunks: list[dict]) -> dict:
             embedding_function=embedding_fn,
             metadata={"hnsw:space": "cosine"},
         )
+
         ids = [f"chunk_{i}" for i in range(len(chunks))]
         documents = [c["content"] for c in chunks]
         metadatas = [
@@ -792,32 +858,65 @@ def _chromadb_build_sync(chunks: list[dict]) -> dict:
                     documents=documents[i:i + batch_size],
                     metadatas=metadatas[i:i + batch_size],
                 )
-        log.info("Built GML embeddings collection: %d chunks indexed", len(ids))
+        log.info("Built %s embeddings collection: %d chunks indexed", source_label, len(ids))
         return {"enabled": True, "chunk_count": len(ids), "collection_name": collection_name}
     except Exception as exc:
-        log.error("Failed to build GML embeddings collection: %s", exc)
+        log.error("Failed to build %s embeddings collection: %s", source_label, exc)
         return {"enabled": False, "error": str(exc), "chunk_count": 0}
 
 
-async def _build_embeddings_background() -> None:
-    """Background task: builds Chroma embeddings without blocking the event loop."""
+async def _build_gml_embeddings_background() -> None:
+    """Background task: builds GML Chroma embeddings without blocking the event loop."""
     try:
         gml_index = getattr(app.state, "gml_index", None)
         if not gml_index or not gml_index.get("chunks"):
             log.warning("GML embeddings: index not ready, skipping build")
-            app.state.embeddings_ready = False
+            app.state.gml_embeddings_ready = False
             return
-        result = await asyncio.to_thread(_chromadb_build_sync, gml_index["chunks"])
-        app.state.embeddings_ready = result.get("enabled", False)
+        result = await asyncio.to_thread(
+            _chromadb_build_sync,
+            gml_index["chunks"],
+            collection_name="gml_docs",
+            source_label="GML",
+            client_kind="gml",
+        )
+        app.state.gml_embeddings_ready = result.get("enabled", False)
         if result.get("enabled"):
             log.info("GML embeddings collection ready: %d chunks", result["chunk_count"])
         else:
             log.warning("GML embeddings not available: %s", result.get("error", "unknown"))
     except Exception as exc:
         log.error("GML embeddings background task failed: %s", exc)
-        app.state.embeddings_ready = False
+        app.state.gml_embeddings_ready = False
     finally:
-        app.state.embeddings_building = False
+        app.state.gml_embeddings_building = False
+
+
+async def _build_ps_embeddings_background() -> None:
+    """Background task: builds PowerShell docs Chroma embeddings without blocking the event loop."""
+    try:
+        ps_index = getattr(app.state, "ps_index", None)
+        if not ps_index or not ps_index.get("chunks"):
+            log.warning("PowerShell docs embeddings: index not ready, skipping build")
+            app.state.ps_embeddings_ready = False
+            return
+        result = await asyncio.to_thread(
+            _chromadb_build_sync,
+            ps_index["chunks"],
+            collection_name="ps_docs",
+            source_label="PowerShell docs",
+            client_kind="ps",
+        )
+        app.state.ps_embeddings_ready = result.get("enabled", False)
+        if result.get("enabled"):
+            log.info("PowerShell docs embeddings collection ready: %d chunks", result["chunk_count"])
+        else:
+            log.warning("PowerShell docs embeddings not available: %s", result.get("error", "unknown"))
+    except Exception as exc:
+        log.error("PowerShell docs embeddings background task failed: %s", exc)
+        app.state.ps_embeddings_ready = False
+    finally:
+        app.state.ps_embeddings_building = False
 
 
 async def build_gml_embeddings_collection() -> dict:
@@ -835,31 +934,67 @@ async def build_gml_embeddings_collection() -> dict:
             "error": "GML index not found; cannot build embeddings",
             "chunk_count": 0,
         }
-    return await asyncio.to_thread(_chromadb_build_sync, gml_index["chunks"])
+    return await asyncio.to_thread(
+        _chromadb_build_sync,
+        gml_index["chunks"],
+        collection_name="gml_docs",
+        source_label="GML",
+        client_kind="gml",
+    )
 
 
-def search_gml_docs(query: str, limit: int = GML_RESULT_LIMIT) -> list[dict]:
-    """Search GML docs using vector embeddings (semantic search)."""
+async def build_ps_embeddings_collection() -> dict:
+    """Async wrapper used outside of the background startup task."""
+    if not CHROMADB_AVAILABLE:
+        return {
+            "enabled": False,
+            "error": "chromadb not available; install with: pip install chromadb sentence-transformers",
+            "chunk_count": 0,
+        }
+    ps_index = getattr(app.state, "ps_index", None)
+    if not ps_index or not ps_index.get("chunks"):
+        return {
+            "enabled": False,
+            "error": "PowerShell docs index not found; cannot build embeddings",
+            "chunk_count": 0,
+        }
+    return await asyncio.to_thread(
+        _chromadb_build_sync,
+        ps_index["chunks"],
+        collection_name="ps_docs",
+        source_label="PowerShell docs",
+        client_kind="ps",
+    )
+
+
+def _search_docs(
+    query: str,
+    *,
+    limit: int,
+    collection_name: str,
+    source_label: str,
+    client_kind: str,
+) -> list[dict]:
     if not CHROMADB_AVAILABLE:
         log.warning("Chroma not available; cannot perform semantic search")
         return []
-    
-    client = get_or_init_chroma_client()
+
+    client = get_or_init_chroma_client(client_kind)
     if not client:
         return []
-    
+
     try:
-        collection = client.get_collection(name="gml_docs")
+        collection = client.get_collection(name=collection_name)
     except Exception as exc:
-        log.warning("GML embeddings collection not found: %s. Falling back to empty results.", exc)
+        log.warning("%s embeddings collection not found: %s. Falling back to empty results.", source_label, exc)
         return []
-    
+
     try:
         results = collection.query(
             query_texts=[query],
             n_results=limit,
         )
-        
+
         selected = []
         if results and results["ids"] and len(results["ids"]) > 0:
             for i, doc_id in enumerate(results["ids"][0]):
@@ -867,23 +1002,57 @@ def search_gml_docs(query: str, limit: int = GML_RESULT_LIMIT) -> list[dict]:
                     metadata = results["metadatas"][0][i]
                     document = results["documents"][0][i]
                     distance = results["distances"][0][i] if results.get("distances") else 0
-                    
+
                     selected.append({
                         "score": 1.0 - distance,
                         "path": metadata.get("path", ""),
                         "heading": metadata.get("heading", ""),
                         "content": document,
                     })
-        
+
         return selected
     except Exception as exc:
-        log.error("GML semantic search failed: %s", exc)
+        log.error("%s semantic search failed: %s", source_label, exc)
         return []
+
+
+def search_gml_docs(query: str, limit: int = GML_RESULT_LIMIT) -> list[dict]:
+    """Search GML docs using vector embeddings (semantic search)."""
+    return _search_docs(
+        query,
+        limit=limit,
+        collection_name="gml_docs",
+        source_label="GML",
+        client_kind="gml",
+    )
+
+
+def search_ps_docs(query: str, limit: int = PS_RESULT_LIMIT) -> list[dict]:
+    """Search PowerShell docs using vector embeddings (semantic search)."""
+    return _search_docs(
+        query,
+        limit=limit,
+        collection_name="ps_docs",
+        source_label="PowerShell docs",
+        client_kind="ps",
+    )
 
 
 def format_gml_snippets(snippets: list[dict]) -> str:
     lines = [
-        "The following excerpts were retrieved from the local GameMaker markdown manual under /gml.",
+        "The following excerpts were retrieved from the local GameMaker markdown manual under /indexed-docs/gml.",
+        "Use them to ground your answer when they are relevant.",
+    ]
+    for index, snippet in enumerate(snippets, 1):
+        lines.append(
+            f"\n[{index}] {snippet['path']} :: {snippet['heading']}\n{snippet['content']}"
+        )
+    return "\n".join(lines)
+
+
+def format_ps_snippets(snippets: list[dict]) -> str:
+    lines = [
+        "The following excerpts were retrieved from local PowerShell markdown docs under /indexed-docs/ps-docs.",
         "Use them to ground your answer when they are relevant.",
     ]
     for index, snippet in enumerate(snippets, 1):
@@ -1305,7 +1474,7 @@ async def login(body: LoginRequest):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, password_hash, role, is_active, file_tools_enabled, workspace_root, created_at FROM users WHERE username=?",
+            "SELECT id, username, password_hash, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users WHERE username=?",
             (username,),
         )
         user = await cursor.fetchone()
@@ -1324,6 +1493,7 @@ async def login(body: LoginRequest):
                 "role": user["role"],
                 "file_tools_enabled": bool(user["file_tools_enabled"]),
                 "workspace_root": user["workspace_root"],
+                "persona_prompt": user["persona_prompt"],
                 "created_at": user["created_at"],
             },
         }
@@ -1388,6 +1558,7 @@ async def signup(body: SignupRequest):
                 "role": "user",
                 "file_tools_enabled": False,
                 "workspace_root": "",
+                "persona_prompt": "",
                 "created_at": now,
             },
         }
@@ -1403,6 +1574,7 @@ async def auth_me(current_user: dict = Depends(get_current_user)):
         "role": current_user["role"],
         "file_tools_enabled": bool(current_user["file_tools_enabled"]),
         "workspace_root": current_user["workspace_root"],
+        "persona_prompt": current_user.get("persona_prompt", ""),
         "created_at": current_user["created_at"],
     }
 
@@ -1412,7 +1584,7 @@ async def admin_list_users(_: dict = Depends(require_admin)):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, created_at FROM users ORDER BY created_at ASC"
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users ORDER BY created_at ASC"
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -1451,6 +1623,7 @@ async def admin_create_user(body: AdminCreateUserRequest, _: dict = Depends(requ
             "is_active": 1,
             "file_tools_enabled": False,
             "workspace_root": "",
+            "persona_prompt": "",
             "created_at": ts,
         }
     finally:
@@ -1532,11 +1705,32 @@ async def admin_update_user(
 
         # Return updated user
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, created_at FROM users WHERE id=?",
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users WHERE id=?",
             (user_id,),
         )
         user = await cursor.fetchone()
         return dict(user) if user else {"ok": True}
+    finally:
+        await db.close()
+
+
+@app.post("/api/admin/persona")
+async def admin_update_persona(
+    body: AdminPersonaUpdateRequest,
+    current_user: dict = Depends(require_admin),
+):
+    persona_prompt = (body.persona_prompt or "").strip()
+    if len(persona_prompt) > 8000:
+        raise HTTPException(status_code=400, detail="Persona prompt is too long (max 8000 characters)")
+
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE users SET persona_prompt=? WHERE id=?",
+            (persona_prompt, current_user["id"]),
+        )
+        await db.commit()
+        return {"ok": True, "persona_prompt": persona_prompt}
     finally:
         await db.close()
 
@@ -1635,8 +1829,13 @@ async def get_settings(_: dict = Depends(get_current_user)):
     key = get_brave_api_key()
     masked = (key[:4] + "..." + key[-4:]) if len(key) > 8 else ("*" * len(key) if key else "")
     gml_index = await ensure_gml_index_loaded()
-    embeddings_enabled = CHROMADB_AVAILABLE and getattr(app.state, "embeddings_ready", False)
-    embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "embeddings_building", False)
+    ps_index = await ensure_ps_index_loaded()
+
+    gml_embeddings_enabled = CHROMADB_AVAILABLE and getattr(app.state, "gml_embeddings_ready", False)
+    gml_embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "gml_embeddings_building", False)
+    ps_embeddings_enabled = CHROMADB_AVAILABLE and getattr(app.state, "ps_embeddings_ready", False)
+    ps_embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "ps_embeddings_building", False)
+
     return {
         "brave_api_key_set": bool(key),
         "brave_api_key_masked": masked,
@@ -1645,9 +1844,17 @@ async def get_settings(_: dict = Depends(get_current_user)):
         "gml_docs_chunk_count": gml_index.get("chunk_count", 0),
         "gml_docs_indexed_at": gml_index.get("indexed_at", ""),
         "gml_docs_error": gml_index.get("error", ""),
-        "gml_embeddings_enabled": embeddings_enabled,
-        "gml_embeddings_building": embeddings_building,
-        "gml_embeddings_model": "all-MiniLM-L6-v2" if embeddings_enabled else None,
+        "gml_embeddings_enabled": gml_embeddings_enabled,
+        "gml_embeddings_building": gml_embeddings_building,
+        "gml_embeddings_model": "all-MiniLM-L6-v2" if gml_embeddings_enabled else None,
+        "ps_docs_enabled": bool(ps_index.get("enabled")),
+        "ps_docs_file_count": ps_index.get("file_count", 0),
+        "ps_docs_chunk_count": ps_index.get("chunk_count", 0),
+        "ps_docs_indexed_at": ps_index.get("indexed_at", ""),
+        "ps_docs_error": ps_index.get("error", ""),
+        "ps_embeddings_enabled": ps_embeddings_enabled,
+        "ps_embeddings_building": ps_embeddings_building,
+        "ps_embeddings_model": "all-MiniLM-L6-v2" if ps_embeddings_enabled else None,
     }
 
 
@@ -2111,8 +2318,20 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             if gml_snippets:
                 log.info("Injecting %d GML snippet(s) for conv %s", len(gml_snippets), req.conversation_id)
 
+        ps_snippets: list[dict] = []
+        if req.use_ps_docs:
+            await ensure_ps_index_loaded()
+            ps_snippets = search_ps_docs(req.message)
+            if ps_snippets:
+                log.info("Injecting %d PowerShell snippet(s) for conv %s", len(ps_snippets), req.conversation_id)
+
         # Build base message list
         ollama_messages: list[dict] = []
+
+        # Admin persona prompt (hot-loaded from DB per request)
+        admin_persona_prompt = (current_user.get("persona_prompt") or "").strip()
+        if current_user.get("role") == "admin" and admin_persona_prompt:
+            ollama_messages.append({"role": "system", "content": admin_persona_prompt})
 
         # System prompts based on requested features
         if req.use_gml_docs:
@@ -2121,6 +2340,14 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 ollama_messages.append({
                     "role": "system",
                     "content": format_gml_snippets(gml_snippets),
+                })
+
+        if req.use_ps_docs:
+            ollama_messages.append({"role": "system", "content": PS_SYSTEM_PROMPT})
+            if ps_snippets:
+                ollama_messages.append({
+                    "role": "system",
+                    "content": format_ps_snippets(ps_snippets),
                 })
 
         if use_file_tools:
@@ -2195,37 +2422,33 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                             yield f"data: {json.dumps({'type': 'error', 'message': body})}\n\n"
                             return
 
-                        # Accumulate all chunks first to get tool_calls which come in the final chunk
-                        all_chunks = []
+                        # Stream chunks to the frontend immediately while collecting tool calls.
                         async for raw_line in resp.content:
                             line = raw_line.decode("utf-8").strip()
                             if not line:
                                 continue
                             try:
                                 chunk = json.loads(line)
-                                all_chunks.append(chunk)
                             except json.JSONDecodeError:
                                 continue
 
-                    # Process accumulated chunks
-                    for chunk in all_chunks:
-                        msg_chunk = chunk.get("message", {})
-                        td = msg_chunk.get("thinking", "")
-                        cd = msg_chunk.get("content", "")
+                            msg_chunk = chunk.get("message", {})
+                            td = msg_chunk.get("thinking", "")
+                            cd = msg_chunk.get("content", "")
 
-                        if td:
-                            turn_thinking += td
-                            all_thinking += td
-                            yield f"data: {json.dumps({'type': 'thinking', 'delta': td})}\n\n"
+                            if td:
+                                turn_thinking += td
+                                all_thinking += td
+                                yield f"data: {json.dumps({'type': 'thinking', 'delta': td})}\n\n"
 
-                        if cd:
-                            turn_content += cd
-                            final_content += cd
-                            yield f"data: {json.dumps({'type': 'content', 'delta': cd})}\n\n"
+                            if cd:
+                                turn_content += cd
+                                final_content += cd
+                                yield f"data: {json.dumps({'type': 'content', 'delta': cd})}\n\n"
 
-                        # Tool calls come at the end, but check each chunk
-                        if "tool_calls" in msg_chunk:
-                            turn_tool_calls.extend(msg_chunk.get("tool_calls", []))
+                            maybe_tool_calls = msg_chunk.get("tool_calls")
+                            if isinstance(maybe_tool_calls, list) and maybe_tool_calls:
+                                turn_tool_calls.extend(maybe_tool_calls)
 
                     # ── Turn complete ──
                     if not turn_tool_calls:
@@ -2297,7 +2520,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
 
             # Stream completed successfully
             token_count = estimate_tokens(final_content + all_thinking)
-            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'commands_run': commands_run, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': bool(gml_snippets), 'gml_snippet_count': len(gml_snippets)})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'commands_run': commands_run, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': bool(gml_snippets), 'gml_snippet_count': len(gml_snippets), 'ps_docs_used': bool(ps_snippets), 'ps_docs_snippet_count': len(ps_snippets)})}\n\n"
 
         except aiohttp.ClientConnectorError:
             yield f"data: {json.dumps({'type': 'error', 'message': 'Cannot connect to Ollama. Is it running? (ollama serve)'})}\n\n"
