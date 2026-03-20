@@ -13,13 +13,15 @@ A lightweight local chat application with:
 
 - Multi-conversation chat UI (create, list, delete)
 - Login and invite-token signup
-- Admin panel for creating/deleting users and generating invite tokens
+- Centered admin control panel modal with two columns (tooling/model controls on the left, user management on the right)
+- Admin persona prompt box for hot-loading the assistant system prompt on the fly
 - Per-user conversation isolation
 - Streaming assistant responses with separate reasoning/thinking display
 - Markdown rendering in responses with syntax highlighting for code blocks
 - Optional web-search loop using `<search>...</search>` tags from the model
 - Long-term memory retrieval from older conversations when active context is truncated
-- Local GameMaker manual retrieval from `/gml/**/*.md` for GML-specific coding help
+- Local GameMaker manual retrieval from `/indexed-docs/gml/**/*.md` for GML-specific coding help
+- Local PowerShell docs retrieval from `/indexed-docs/ps-docs/**/*.md` for PowerShell-specific guidance
 - Auto-start attempt for `ollama serve` when Ollama is not running
 - Persistent settings for Brave API key in `config.json`
 
@@ -131,6 +133,8 @@ All routes above require a bearer token.
 - `GET /api/admin/users` - list users (admin only)
 - `POST /api/admin/users` - create user (admin only)
 - `POST /api/admin/invites` - generate invite token (admin only)
+- `PATCH /api/admin/users/{user_id}` - update file-tools access and workspace root (admin only)
+- `POST /api/admin/persona` - save admin persona/system prompt (hot-loaded in next chat request)
 - `DELETE /api/admin/users/{user_id}` - delete user (admin only)
 
 ### Settings
@@ -151,11 +155,14 @@ Chat request payload:
   "model": "huihui_ai/qwen3-abliterated:8b",
   "think": true,
   "use_search": true,
-  "use_gml_docs": true
+  "use_gml_docs": true,
+  "use_ps_docs": true
 }
 ```
 
-When `use_gml_docs` is enabled, the backend scans Markdown files under `gml/` at startup, chunks them for retrieval, and injects the most relevant GameMaker manual excerpts into the model prompt for each chat request.
+When `use_gml_docs` is enabled, the backend scans Markdown files under `indexed-docs/gml/` at startup, chunks them for retrieval, and injects the most relevant local GameMaker manual excerpts into the model prompt for each chat request.
+
+When `use_ps_docs` is enabled, the backend scans Markdown files under `indexed-docs/ps-docs/` at startup, chunks them for retrieval, and injects the most relevant local PowerShell documentation excerpts into the model prompt for each chat request.
 
 SSE event types include:
 
@@ -172,6 +179,7 @@ The app creates `memory.db` on startup.
 
 Main tables:
 
+- `users(id, username, role, file_tools_enabled, workspace_root, persona_prompt, ...)`
 - `conversations(id, title, created_at)`
 - `messages(id, conversation_id, role, content, thinking, token_count, created_at)`
 - `messages_fts` (FTS5 virtual table indexing message content)
@@ -196,16 +204,16 @@ Triggers keep `messages_fts` in sync for inserts/deletes.
 
 ## Convert GameMaker Manual To Markdown
 
-Use this script to convert all `.htm` and `.html` files under `gml/Manual` to `.md` files for AI ingestion:
+Use this script to convert all `.htm` and `.html` files under `indexed-docs/gml/Manual` to `.md` files for AI ingestion:
 
 ```bash
-python convert_manual_html_to_md.py --input-dir gml/Manual --output-dir gml/Manual_md --overwrite
+python convert_manual_html_to_md.py --input-dir indexed-docs/gml/Manual --output-dir indexed-docs/gml/Manual_md --overwrite
 ```
 
 For cleaner RAG/embedding text that strips images and common nav/footer boilerplate:
 
 ```bash
-python convert_manual_html_to_md.py --input-dir gml/Manual --output-dir gml/Manual_md_ai --overwrite --ai-clean
+python convert_manual_html_to_md.py --input-dir indexed-docs/gml/Manual --output-dir indexed-docs/gml/Manual_md_ai --overwrite --ai-clean
 ```
 
 Notes:
