@@ -1,25 +1,51 @@
 # Qwen3-Coder Agentic Tooling Reimplementation Plan
 
-**Status**: Plan Document (Detailed diagnosis and implementation strategy)  
-**Date**: March 20, 2026  
-**Root Cause**: qwen3-coder tool-calling support requires configuration updates in qwen-agent initialization
+**Status**: In Progress (Partially Implemented; updated with current-state audit)  
+**Date**: March 21, 2026  
+**Root Cause (Current Understanding)**: Remaining reliability issues are primarily stream contract consistency and observability gaps, not missing qwen3-coder base configuration.
 
 ---
 
 ## Executive Summary
 
-The upgrade to qwen3-coder introduced breaking changes in how tool calling is handled:
+The original diagnosis correctly identified several possible failure points, but the codebase has already implemented many core fixes. Current findings:
 
-- **qwen3-coder has DIFFERENT tool-calling mechanics** than previous Qwen3 models
-- **Current code lacks explicit configuration** for qwen3-coder tool parsing
-- **Response message format handling** may not align with qwen3-coder's tool_calls structure
-- **Error visibility is limited** - no detailed diagnostics for tool invocation failures
+- **LLM tool config is present**: `use_raw_api` + `fncall_prompt_type` are already wired in `server.py`.
+- **OpenAI-compatible endpoint is present**: backend uses `OLLAMA_OPENAI_URL = .../v1`.
+- **Tool schema conversion + JSON validation is present** in `agent_tools.py` (`qwen_params_to_json_schema`).
+- **MCP fail-open retry is present** (retry once without MCP when initialization/EOF fails).
+- **Recently fixed (Mar 21)**: backend now emits `tool_call`/`tool_result` SSE events, emits `searches_done` in `done`, and classifies stream errors with `error_type`.
 
 ### What's Needed
-1. Update LLM configuration to properly support qwen3-coder's native tool parsing
-2. Add robust response handling for qwen3-coder's tool_calls format
-3. Improve error reporting for tool invocation failures
-4. Validate that tool schemas are proper JSON and supported by Ollama
+1. Keep dependency/runtime compatibility stable (qwen-agent + Ollama versions)
+2. Add/automate diagnostics to verify tool event flow end-to-end after upgrades
+3. Strengthen observability (structured counters + failure categories)
+4. Convert remaining "proposal" items in this doc into verified test cases
+
+---
+
+## Current Implementation Snapshot (Audit: March 21, 2026)
+
+### Already Implemented
+
+- `server.py` includes admin/environment-controlled tool mode selection (`use_raw_api`, `fncall_prompt_type`).
+- `server.py` builds mixed tool lists (native + MCP config dict) with feature gating and per-user permissions.
+- `server.py` tracks function/tool messages in stream and aggregates usage counters (`tools_called`, `file_reads`, `file_writes`, etc.).
+- `agent_tools.py` registers native tools via `BaseTool`, converts list-style params to strict JSON schema, and validates serializability.
+- `agent_tools.py` overrides built-in `web_search` with Brave-backed implementation and supports per-request context via `ContextVar`.
+
+### Implemented in This Iteration
+
+- SSE now emits `tool_call` with name/args when assistant `tool_calls` (or legacy `function_call`) appear.
+- SSE now emits `tool_result` when function/tool role results are appended.
+- `done` event now includes `searches_done` to match frontend expectations.
+- `error` event now includes `error_type` classification (`tool_error`, `mcp_error`, `connection_error`, `unknown_error`).
+
+### Known Follow-ups
+
+- Add a lightweight integration test that validates SSE event contract (`content`, `thinking`, `tool_call`, `tool_result`, `done`, `error`).
+- Optionally pin an upper/lower `qwen-agent` range once validated in your deployment environment.
+- Add a startup/runtime self-check endpoint for tool availability diagnostics.
 
 ---
 
@@ -220,7 +246,7 @@ llm_cfg = {
         **(generate_cfg or {}),
         # Explicit tool parsing configuration for qwen3-coder
         "fncall_prompt_type": "nous",  # Qwen3 coder uses Nous template
-        "use_raw_api": False,  # Let qwen-agent handle tool parsing for Ollama
+        "use_raw_api": True,  # Prefer OpenAI-style native tool_calls path
     },
 }
 ```
@@ -486,9 +512,9 @@ if not QWEN_AGENT_RUNTIME_AVAILABLE or not USE_AGENT_TOOLS:
 
 ## Next Action
 
-**Immediately execute Phase 1** to diagnose exact failure point:
-1. Run `test_qwen3_tools.py` to identify whether issue is in Ollama or qwen-agent
-2. Check `pip show qwen-agent` version
-3. Look for actual error messages in chat attempts
+**Recommended immediate next actions**:
+1. Run a single end-to-end chat that triggers at least one tool call and confirm frontend indicators update from live SSE events.
+2. Add a small automated regression test for the SSE tool-event contract.
+3. Re-baseline this document by marking obsolete "missing configuration" items as historical context only.
 
-Once diagnosis is complete, proceed with targeted Phase 2-4 fixes.
+Then continue with targeted reliability hardening from Phases 3-4 (tests + observability).

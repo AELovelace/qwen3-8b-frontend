@@ -1,0 +1,1 @@
+{"ip": "0.0.0.0", "key": "77a5d5f5-5ae5-4a62-932a-327f64a9f3ef", "transport": "tcp", "signature_scheme": "hmac-sha256", "kernel_name": "", "shell_port": 8345, "iopub_port": 8346, "stdin_port": 8347, "hb_port": 8348, "control_port": 8349}

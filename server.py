@@ -11,7 +11,9 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
+import sys
 import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
@@ -28,6 +30,9 @@ load_dotenv(Path(__file__).parent / ".env")
 from agent_tools import (
     set_request_context,
     code_interpreter,
+    get_or_create_ps_session,
+    is_ps_available,
+    release_ps_session,
 )
 
 try:
@@ -39,9 +44,10 @@ except ImportError:
 
 import aiohttp
 import aiosqlite
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from pydantic import BaseModel
@@ -86,20 +92,16 @@ ACCESS_TOKEN_HOURS     = 24
 SEARCH_TAG_RE = re.compile(r'<search>(.*?)</search>', re.IGNORECASE | re.DOTALL)
 GML_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
-# Matches pseudo tool-call syntax the model emits when it narrates tool use in
-# plain text instead of making a real structured tool call, e.g.:
-#   <function=list_dir>   <tool_call>   <|tool_call|>   [TOOL:read_file]
-# Detecting these lets the backend warn the frontend about tool-mode mismatch.
-PSEUDO_TOOL_TAG_RE = re.compile(
-    r'(?:'
-    r'<function\s*=\s*\w+>'
-    r'|<tool_call>'
-    r'|<\|tool_call\|>'
-    r'|\[TOOL\s*:\s*\w+\]'
-    r'|<tool_use>'
-    r')',
-    re.IGNORECASE,
+TOOL_ERROR_RE = re.compile(r"\[(?:error|permission denied):|\berror\b|\bexception\b", re.IGNORECASE)
+LITERAL_TOOL_CALL_RE = re.compile(
+    r"<\s*function\s*=\s*([a-zA-Z0-9_:\-]+)\s*>(.*?)<\s*/\s*function\s*>",
+    re.IGNORECASE | re.DOTALL,
 )
+LITERAL_PARAM_RE = re.compile(
+    r"<\s*parameter\s*=\s*([a-zA-Z0-9_:\-]+)\s*>(.*?)<\s*/\s*parameter\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 _ollama_endpoint = urlparse(OLLAMA_BASE_URL)
 OLLAMA_HOST = (_ollama_endpoint.hostname or "").lower()
@@ -141,9 +143,19 @@ FILE_TOOLS_SYSTEM_PROMPT = (
     "You can use these tools to analyze code, make edits, and validate your work. "
     "For code execution, use the code_interpreter tool, which runs inside a Docker sandbox mounted to the workspace only. "
     "Do not ask for shell command execution; it is not available. "
-    "If you show a tool call in assistant-visible text, always surround it with a markdown fenced code block. "
     "When the user asks to list files or directories, call list_dir and return the exact directory entries from the tool output, "
     "one per line, without summarizing, grouping, or omitting entries unless the tool itself reports truncation."
+)
+
+MCP_FILE_TOOLS_SYSTEM_PROMPT = (
+    "You have access to MCP filesystem tools for reading, writing, and searching files. "
+    "The workspace is sandboxed to a specific root directory configured by your admin. "
+    "Use the MCP filesystem server tools to analyze code, make edits, and validate your work. "
+    "For code execution, use the code_interpreter tool, which runs inside a Docker sandbox mounted to the workspace only. "
+    "Do not ask for shell command execution; it is not available. "
+    "When the user asks to list files or directories, call the appropriate directory listing tool and return "
+    "the exact entries from the tool output, one per line, without summarizing, grouping, or omitting entries "
+    "unless the tool itself reports truncation."
 )
 
 TOOL_EXECUTION_CONTRACT_PROMPT = (
@@ -155,7 +167,9 @@ TOOL_EXECUTION_CONTRACT_PROMPT = (
     "For file inventory requests, include every discovered file and provide one concise line per file; include binary/unreadable files with that label. "
     "Before finishing, verify scope coverage and that output count matches discovered items. "
     "If a tool call fails, retry with an equivalent method; if still blocked, report what was tried and return partial results clearly labeled PARTIAL. "
-    "Only mark completion when all requested items are delivered."
+    "Only mark completion when all requested items are delivered. "
+    "Do not output literal tool markup such as <function=...>, <tool_call>, or <parameter=...>; "
+    "invoke tools only through native OpenAI-style tool_calls."
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -200,6 +214,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Ollama Qwen3 Chat", lifespan=lifespan)
+app.mount("/resources", StaticFiles(directory=Path(__file__).parent / "resources"), name="resources")
 _ollama_start_lock = asyncio.Lock()
 _gml_index_lock = asyncio.Lock()
 _ps_index_lock = asyncio.Lock()
@@ -291,8 +306,9 @@ _DDL_STATEMENTS = [
 
 async def get_db() -> aiosqlite.Connection:
     """Return a connected database connection (row_factory set)."""
-    db = await aiosqlite.connect(DB_PATH)
+    db = await aiosqlite.connect(DB_PATH, timeout=30)
     db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA busy_timeout = 30000")
     await db.execute("PRAGMA foreign_keys = ON")
     return db
 
@@ -455,12 +471,35 @@ async def ensure_bootstrap_admin(db: aiosqlite.Connection) -> dict:
     return {"id": admin_id, "username": admin_username, "role": "admin"}
 
 
-async def backfill_legacy_conversations(db: aiosqlite.Connection, fallback_user_id: str) -> None:
-    await db.execute(
-        "UPDATE conversations SET user_id = ? WHERE user_id IS NULL OR TRIM(user_id) = ''",
-        (fallback_user_id,),
-    )
-    await db.commit()
+async def backfill_legacy_conversations(db: aiosqlite.Connection, fallback_user_id: str) -> bool:
+    max_attempts = 8
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await db.execute(
+                "UPDATE conversations SET user_id = ? WHERE user_id IS NULL OR TRIM(user_id) = ''",
+                (fallback_user_id,),
+            )
+            await db.commit()
+            return True
+        except sqlite3.OperationalError as exc:
+            is_locked = "database is locked" in str(exc).lower()
+            if not is_locked:
+                raise
+            if attempt >= max_attempts:
+                log.warning(
+                    "Skipping legacy conversation backfill after %d locked attempts; startup will continue",
+                    max_attempts,
+                )
+                return False
+            delay = min(0.25 * attempt, 2.0)
+            log.warning(
+                "DB locked during legacy conversation backfill (attempt %d/%d); retrying in %.2fs",
+                attempt,
+                max_attempts,
+                delay,
+            )
+            await asyncio.sleep(delay)
+    return False
 
 
 async def get_current_user(
@@ -598,7 +637,9 @@ class ChatRequest(BaseModel):
     use_ps_docs: bool = False
     use_file_tools: bool = False
     use_code_interpreter: bool = False  # Docker-based sandboxed Python execution
+    use_powershell: bool = False  # Persistent PowerShell session (native or Docker)
     use_mcp_tools: bool = True  # Include initialised MCP server tools
+    working_subdir: str = ""
 
 
 class SettingsUpdate(BaseModel):
@@ -628,6 +669,16 @@ class AdminCreateInviteRequest(BaseModel):
 
 class AdminPersonaUpdateRequest(BaseModel):
     persona_prompt: str = ""
+
+
+class AdminGlobalToolingUpdateRequest(BaseModel):
+    use_gml_docs: bool = True
+    use_ps_docs: bool = True
+    use_file_tools: bool = True
+    use_code_interpreter: bool = True
+    use_powershell: str = "off"  # "off" | "native" | "docker"
+    use_mcp_tools: bool = True
+    use_raw_api: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -1212,6 +1263,41 @@ def get_brave_api_key() -> str:
     return os.environ.get("BRAVE_API_KEY") or load_config().get("brave_api_key", "")
 
 
+def get_global_tool_toggles() -> dict:
+    cfg = load_config()
+    saved = cfg.get("global_tool_toggles", {}) if isinstance(cfg, dict) else {}
+    ps_mode = saved.get("use_powershell", "off")
+    if ps_mode not in ("off", "native", "docker"):
+        ps_mode = "off"
+    return {
+        "use_gml_docs": bool(saved.get("use_gml_docs", True)),
+        "use_ps_docs": bool(saved.get("use_ps_docs", True)),
+        "use_file_tools": bool(saved.get("use_file_tools", True)),
+        "use_code_interpreter": bool(saved.get("use_code_interpreter", True)),
+        "use_powershell": ps_mode,
+        "use_mcp_tools": bool(saved.get("use_mcp_tools", True)),
+        "use_raw_api": True,
+    }
+
+
+def save_global_tool_toggles(toggles: dict) -> None:
+    cfg = load_config()
+    ps_mode = str(toggles.get("use_powershell", "off"))
+    if ps_mode not in ("off", "native", "docker"):
+        ps_mode = "off"
+    cfg["global_tool_toggles"] = {
+        "use_gml_docs": bool(toggles.get("use_gml_docs", True)),
+        "use_ps_docs": bool(toggles.get("use_ps_docs", True)),
+        "use_file_tools": bool(toggles.get("use_file_tools", True)),
+        "use_code_interpreter": bool(toggles.get("use_code_interpreter", True)),
+        "use_powershell": ps_mode,
+        "use_mcp_tools": bool(toggles.get("use_mcp_tools", True)),
+        # OpenAI-style tool_calls is enforced globally for consistency.
+        "use_raw_api": True,
+    }
+    save_config(cfg)
+
+
 def _default_user_mcp_config(workspace_root: str) -> dict:
     cfg = {
         "mcpServers": {
@@ -1501,7 +1587,6 @@ async def save_messages(
 # File Tools — sandboxed local file operations
 # ---------------------------------------------------------------------------
 
-MAX_TOOL_ITERATIONS = 15
 MAX_FILE_READ_LINES = 500
 MAX_FILE_READ_BYTES = 50_000
 MAX_FILE_WRITE_BYTES = 500_000
@@ -1601,10 +1686,13 @@ def ft_replace_in_file(workspace_root: str, path: str, old_str: str, new_str: st
 
 def ft_list_dir(workspace_root: str, path: str) -> str:
     """List directory contents. Returns names with '/' suffix for directories."""
+    requested_path = path
     if path == "" or path == ".":
         target = Path(workspace_root).resolve()
     else:
         target = resolve_sandboxed_path(workspace_root, path)
+
+    log.info("list_dir request: workspace_root=%s requested_path=%r resolved_target=%s", workspace_root, requested_path, target)
     
     if not target.is_dir():
         raise FileToolError(f"Not a directory or does not exist: {target}")
@@ -1613,6 +1701,7 @@ def ft_list_dir(workspace_root: str, path: str) -> str:
     try:
         items = sorted(target.iterdir())
     except PermissionError:
+        log.warning("list_dir permission denied: target=%s", target)
         raise FileToolError(f"Permission denied reading directory: {target}")
     
     if len(items) > 500:
@@ -1624,6 +1713,8 @@ def ft_list_dir(workspace_root: str, path: str) -> str:
             entries.append(f"{item.name}/")
         else:
             entries.append(item.name)
+
+    log.info("list_dir success: target=%s entries=%d truncated=%s", target, len(items), len(items) >= 500)
     
     return "\n".join(entries)
 
@@ -1704,6 +1795,48 @@ def ft_create_directory(workspace_root: str, path: str) -> str:
     target = resolve_sandboxed_path(workspace_root, path)
     target.mkdir(parents=True, exist_ok=True)
     return f"Successfully created directory: {target.name}"
+
+
+def clamp_workspace_subdir(base_workspace_root: str, working_subdir: str) -> Path:
+    """
+    Resolve a user-selected subdirectory, clamped to workspace root on invalid/escape paths.
+    This is the shared guard for user-facing directory selectors.
+    """
+    base = Path((base_workspace_root or "").strip()).resolve()
+    if not str(base_workspace_root or "").strip() or not base.exists():
+        return base
+
+    subdir = (working_subdir or "").strip()
+    if not subdir:
+        return base
+
+    try:
+        candidate = resolve_sandboxed_path(str(base), subdir)
+        return candidate if candidate.is_dir() else base
+    except (PermissionError, FileToolError):
+        return base
+
+
+def clamp_relative_path_or_root(effective_workspace_root: str, path: str) -> Path:
+    """
+    Resolve a path under effective workspace root, clamping to root if invalid/escape/not-dir.
+    """
+    root = Path(effective_workspace_root).resolve()
+    requested = (path or ".").strip()
+    if requested in {"", "."}:
+        return root
+    try:
+        candidate = resolve_sandboxed_path(str(root), requested)
+        return candidate if candidate.is_dir() else root
+    except (PermissionError, FileToolError):
+        return root
+
+
+def resolve_effective_workspace_root(base_workspace_root: str, working_subdir: str) -> str:
+    base = (base_workspace_root or "").strip()
+    if not base:
+        return base
+    return str(clamp_workspace_subdir(base, working_subdir))
 
 
 # ---------------------------------------------------------------------------
@@ -1837,6 +1970,80 @@ async def admin_list_users(_: dict = Depends(require_admin)):
         return [dict(r) for r in rows]
     finally:
         await db.close()
+
+
+@app.get("/api/admin/fs/list")
+async def admin_list_filesystem(path: str = Query(""), _: dict = Depends(require_admin)):
+    requested = (path or "").strip()
+
+    if not requested:
+        if os.name == "nt":
+            entries = []
+            for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                drive = Path(f"{letter}:/")
+                if drive.exists():
+                    entries.append({
+                        "name": f"{letter}:/",
+                        "is_dir": True,
+                        "path": str(drive.resolve()),
+                    })
+            return {
+                "current_path": "",
+                "parent_path": "",
+                "entries": entries,
+            }
+
+        root = Path("/").resolve()
+        requested = str(root)
+
+    try:
+        target = Path(requested).expanduser()
+        if not target.is_absolute():
+            target = (Path.cwd() / target).resolve()
+        else:
+            target = target.resolve()
+
+        if target.is_file():
+            target = target.parent
+        if not target.exists() or not target.is_dir():
+            raise HTTPException(status_code=400, detail=f"Directory does not exist: {target}")
+
+        children = []
+        for item in target.iterdir():
+            try:
+                children.append((not item.is_dir(), item.name.lower(), item))
+            except Exception:
+                continue
+
+        entries = []
+        for _, _, item in sorted(children):
+            try:
+                entries.append({
+                    "name": item.name,
+                    "is_dir": item.is_dir(),
+                    "path": str(item.resolve()),
+                })
+            except Exception:
+                continue
+
+        parent_path = ""
+        try:
+            if target.parent != target:
+                parent_path = str(target.parent.resolve())
+        except Exception:
+            parent_path = ""
+
+        return {
+            "current_path": str(target),
+            "parent_path": parent_path,
+            "entries": entries,
+        }
+    except HTTPException:
+        raise
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/admin/users", status_code=201)
@@ -1983,6 +2190,29 @@ async def admin_update_persona(
         await db.close()
 
 
+@app.get("/api/admin/global-tooling")
+async def get_admin_global_tooling(_: dict = Depends(require_admin)):
+    return get_global_tool_toggles()
+
+
+@app.post("/api/admin/global-tooling")
+async def update_admin_global_tooling(
+    body: AdminGlobalToolingUpdateRequest,
+    _: dict = Depends(require_admin),
+):
+    payload = {
+        "use_gml_docs": body.use_gml_docs,
+        "use_ps_docs": body.use_ps_docs,
+        "use_file_tools": body.use_file_tools,
+        "use_code_interpreter": body.use_code_interpreter,
+        "use_powershell": body.use_powershell,
+        "use_mcp_tools": body.use_mcp_tools,
+        "use_raw_api": True,
+    }
+    save_global_tool_toggles(payload)
+    return {"ok": True, **payload}
+
+
 # ---------------------------------------------------------------------------
 # Routes — conversations
 # ---------------------------------------------------------------------------
@@ -2045,6 +2275,8 @@ async def delete_conversation(conv_id: str, current_user: dict = Depends(get_cur
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Conversation not found")
         await db.commit()
+        # Release any active PowerShell session for this conversation
+        release_ps_session(f"{current_user['id']}:{conv_id}")
         return {"ok": True}
     finally:
         await db.close()
@@ -2087,6 +2319,7 @@ async def get_settings(_: dict = Depends(get_current_user)):
     return {
         "brave_api_key_set": bool(key),
         "brave_api_key_masked": masked,
+        "global_tool_toggles": get_global_tool_toggles(),
         "gml_docs_enabled": bool(gml_index.get("enabled")),
         "gml_docs_file_count": gml_index.get("file_count", 0),
         "gml_docs_chunk_count": gml_index.get("chunk_count", 0),
@@ -2176,12 +2409,73 @@ async def code_interpreter_status(_: dict = Depends(get_current_user)):
     return {"available": available}
 
 
+@app.get("/api/powershell/status")
+async def powershell_status(_: dict = Depends(get_current_user)):
+    """Return the configured PowerShell execution mode and its availability."""
+    toggles = get_global_tool_toggles()
+    mode = toggles.get("use_powershell", "off")
+    if mode == "off":
+        return {"mode": "off", "available": False, "executable": None}
+    available = await asyncio.to_thread(is_ps_available, mode)
+    if mode == "native" and available:
+        import shutil
+        exe = shutil.which("pwsh") or shutil.which("powershell")
+    else:
+        exe = "mcr.microsoft.com/powershell:latest" if mode == "docker" else None
+    return {"mode": mode, "available": available, "executable": exe}
+
+
 @app.post("/api/settings")
 async def update_settings(body: SettingsUpdate, _: dict = Depends(get_current_user)):
     cfg = load_config()
     cfg["brave_api_key"] = body.brave_api_key.strip()
     save_config(cfg)
     return {"ok": True}
+
+
+@app.get("/api/file-tools/list")
+async def file_tools_list(
+    path: str = Query("."),
+    working_subdir: str = Query(""),
+    current_user: dict = Depends(get_current_user),
+):
+    if not bool(current_user.get("file_tools_enabled")):
+        raise HTTPException(status_code=403, detail="File tools are disabled for this account")
+
+    base_root = (current_user.get("workspace_root") or "").strip()
+    if not base_root:
+        raise HTTPException(status_code=400, detail="Workspace root is not configured by admin")
+
+    try:
+        effective_root = resolve_effective_workspace_root(base_root, working_subdir)
+        root_path = Path(effective_root).resolve()
+        target = clamp_relative_path_or_root(effective_root, path)
+
+        entries = []
+        for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+            entries.append({
+                "name": item.name,
+                "is_dir": item.is_dir(),
+                "path": item.relative_to(root_path).as_posix(),
+            })
+
+        current_rel = target.relative_to(root_path).as_posix() if target != root_path else "."
+        base_path = Path(base_root).resolve()
+        normalized_subdir = ""
+        try:
+            rel_to_base = root_path.relative_to(base_path)
+            normalized_subdir = "" if str(rel_to_base) == "." else rel_to_base.as_posix()
+        except ValueError:
+            normalized_subdir = ""
+        return {
+            "working_subdir": normalized_subdir,
+            "cwd": current_rel,
+            "entries": entries,
+        }
+    except FileToolError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2201,15 +2495,33 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             detail=detail,
         )
 
-    # Validate file tools permission
-    use_file_tools = req.use_file_tools and bool(current_user.get("file_tools_enabled"))
+    global_toggles = get_global_tool_toggles()
+
+    # Effective toggles: admin global switch AND per-request user switch
+    use_gml_docs = req.use_gml_docs and global_toggles["use_gml_docs"]
+    use_ps_docs = req.use_ps_docs and global_toggles["use_ps_docs"]
+    use_file_tools = (
+        req.use_file_tools
+        and global_toggles["use_file_tools"]
+        and bool(current_user.get("file_tools_enabled"))
+    )
+    use_code_interpreter = req.use_code_interpreter and global_toggles["use_code_interpreter"]
+    ps_mode = global_toggles.get("use_powershell", "off")
+    use_powershell = req.use_powershell and ps_mode != "off"
+    use_mcp_tools = req.use_mcp_tools and global_toggles["use_mcp_tools"]
+    effective_workspace_root = resolve_effective_workspace_root(
+        current_user.get("workspace_root", ""),
+        req.working_subdir,
+    )
+
     use_any_tooling = any([
         req.use_search,
-        req.use_gml_docs,
-        req.use_ps_docs,
+        use_gml_docs,
+        use_ps_docs,
         use_file_tools,
-        req.use_code_interpreter,
-        req.use_mcp_tools,
+        use_code_interpreter,
+        use_powershell,
+        use_mcp_tools,
     ])
 
     db = await get_db()
@@ -2242,14 +2554,17 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             system_prompt_parts.append(admin_persona_prompt)
 
         # System prompts based on requested features
-        if req.use_gml_docs:
+        if use_gml_docs:
             system_prompt_parts.append(GML_SYSTEM_PROMPT)
 
-        if req.use_ps_docs:
+        if use_ps_docs:
             system_prompt_parts.append(PS_SYSTEM_PROMPT)
 
         if use_file_tools:
-            system_prompt_parts.append(FILE_TOOLS_SYSTEM_PROMPT)
+            if use_mcp_tools:
+                system_prompt_parts.append(MCP_FILE_TOOLS_SYSTEM_PROMPT)
+            else:
+                system_prompt_parts.append(FILE_TOOLS_SYSTEM_PROMPT)
 
         # Enforce stronger compliance when any tool/MCP path is enabled.
         if use_any_tooling:
@@ -2284,20 +2599,44 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
     requested_model = normalize_model_name(req.model)
 
     async def event_stream() -> AsyncGenerator[str, None]:
+        stream_id = uuid.uuid4().hex[:8]
+        user_message_preview = re.sub(r"\s+", " ", str(req.message or "")).strip()[:300]
         # Wire per-request context for BaseTool.call() implementations
         set_request_context(
-            workspace_root=current_user.get("workspace_root", ""),
+            workspace_root=effective_workspace_root,
             brave_api_key=get_brave_api_key(),
+            ps_session_key=f"{current_user['id']}:{req.conversation_id}",
+            ps_mode=ps_mode if use_powershell else "off",
         )
+        log.info(
+            "chat[%s] start user=%s conv=%s model=%s toggles={search:%s,gml:%s,ps:%s,file:%s,code:%s,ps_exec:%s,mcp:%s} workspace=%s",
+            stream_id,
+            current_user.get("id"),
+            req.conversation_id,
+            requested_model,
+            req.use_search,
+            use_gml_docs,
+            use_ps_docs,
+            use_file_tools,
+            use_code_interpreter,
+            use_powershell,
+            use_mcp_tools,
+            effective_workspace_root,
+        )
+        log.info("chat[%s] user_message=%r", stream_id, user_message_preview)
 
         all_thinking = ""
         final_content = ""
         tools_called = 0
+        searches_done = 0
         code_runs = 0
+        powershell_runs = 0
         file_reads = 0
         file_writes = 0
+        file_content_writes = 0
         gml_snippet_count = 0
         ps_snippet_count = 0
+        seen_tool_call_ids: set[str] = set()
         working_msgs = list(ollama_messages)
 
         # Some backends require at most one system message and require it first.
@@ -2320,11 +2659,21 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             working_msgs = non_system_msgs
 
         def _build_agent_function_list(include_mcp_tools: bool = True) -> list:
-            """Build Qwen-Agent function_list based on enabled features."""
+            """Build Qwen-Agent function_list based on enabled features.
+
+            Strategy: when MCP is active, filesystem operations go through
+            the MCP filesystem server.  Only local RAG doc-search tools
+            (gml_docs_search, ps_docs_search), web_search and
+            code_interpreter remain as native/local tools because they have
+            no MCP equivalent.  When MCP is *off*, native file tools are
+            used instead.
+            """
             tools: list = []
+            # Web search — always local (Brave API, no MCP equivalent)
             if req.use_search:
                 tools.append("web_search")
-            if use_file_tools:
+            # Filesystem tools — native only when MCP is disabled
+            if use_file_tools and not use_mcp_tools:
                 tools.extend([
                     "read_file",
                     "write_file",
@@ -2334,13 +2683,19 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     "grep_search",
                     "create_directory",
                 ])
-            if req.use_gml_docs:
+            # Local RAG doc search tools — always local (ChromaDB, no MCP equivalent)
+            if use_gml_docs:
                 tools.append("gml_docs_search")
-            if req.use_ps_docs:
+            if use_ps_docs:
                 tools.append("ps_docs_search")
-            if req.use_code_interpreter and code_interpreter.is_available():
+            # Code interpreter — always local (Docker sandbox, no MCP equivalent)
+            if use_code_interpreter and code_interpreter.is_available():
                 tools.append("code_interpreter")
-            if include_mcp_tools and req.use_mcp_tools:
+            # PowerShell — always local (native or Docker, no MCP equivalent)
+            if use_powershell and is_ps_available(ps_mode):
+                tools.append("run_powershell")
+            # MCP servers — filesystem, memory, sqlite all handled here
+            if include_mcp_tools and use_mcp_tools:
                 try:
                     user_mcp_config = _load_user_mcp_config(
                         current_user.get("mcp_config", ""),
@@ -2351,11 +2706,26 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                         current_user.get("workspace_root", ""),
                     )
                     if resolved_mcp_config.get("mcpServers"):
+                        log.info(
+                            "chat[%s] MCP enabled with servers=%s",
+                            stream_id,
+                            sorted((resolved_mcp_config.get("mcpServers") or {}).keys()),
+                        )
                         tools.append(resolved_mcp_config)
                 except HTTPException as exc:
-                    log.warning("Skipping MCP tools for user %s: %s", current_user.get("id"), exc.detail)
+                    log.warning(
+                        "chat[%s] skipping MCP tools for user %s: %s",
+                        stream_id,
+                        current_user.get("id"),
+                        exc.detail,
+                    )
                 except Exception as exc:
-                    log.warning("Skipping MCP tools for user %s: %s", current_user.get("id"), exc)
+                    log.warning(
+                        "chat[%s] skipping MCP tools for user %s: %s",
+                        stream_id,
+                        current_user.get("id"),
+                        exc,
+                    )
             return tools
 
         def _next_from_iter(it):
@@ -2364,25 +2734,126 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             except StopIteration:
                 return False, None
 
+        def _parse_literal_tool_markup(text: str) -> tuple[str, dict] | None:
+            """Parse legacy literal tool markup from assistant content.
+
+            Example:
+                <function=run_powershell><parameter=code>Get-Location</parameter></function></tool_call>
+            """
+            if not text:
+                return None
+            match = LITERAL_TOOL_CALL_RE.search(text)
+            if not match:
+                return None
+            tool_name = (match.group(1) or "").strip()
+            body = match.group(2) or ""
+            if not tool_name:
+                return None
+            args: dict[str, object] = {}
+            for pm in LITERAL_PARAM_RE.finditer(body):
+                key = (pm.group(1) or "").strip()
+                value = (pm.group(2) or "").strip()
+                if key:
+                    args[key] = value
+            if not args:
+                raw = body.strip()
+                if raw:
+                    args = {"code": raw}
+            return tool_name, args
+
+        def _strip_literal_tool_markup(text: str) -> str:
+            if not text:
+                return ""
+            cleaned = LITERAL_TOOL_CALL_RE.sub("", text)
+            cleaned = re.sub(r"</?\s*tool_call\s*>", "", cleaned, flags=re.IGNORECASE)
+            return cleaned.strip()
+
+        def _execute_literal_tool_call(tool_name: str, args: dict) -> str:
+            """Execute parsed literal tool markup as a fail-open compatibility path."""
+            if tool_name == "code_interpreter":
+                code = str(args.get("code") or "").strip()
+                if not code:
+                    return "[Error: code_interpreter requires a non-empty 'code' parameter]"
+                if not (use_code_interpreter and code_interpreter.is_available()):
+                    return "[Error: code_interpreter is disabled or unavailable]"
+                return code_interpreter.call(code)
+
+            if tool_name == "run_powershell":
+                code = str(args.get("code") or "").strip()
+                if not code:
+                    return "[Error: run_powershell requires a non-empty 'code' parameter]"
+                if not use_powershell:
+                    return "[Error: run_powershell is disabled for this request]"
+                if not is_ps_available(ps_mode):
+                    return f"[Error: run_powershell mode '{ps_mode}' is unavailable]"
+                try:
+                    timeout = int(args.get("timeout") or 30)
+                except Exception:
+                    timeout = 30
+                session_key = f"{current_user['id']}:{req.conversation_id}"
+                session = get_or_create_ps_session(session_key, ps_mode)
+                output, timed_out = session.execute(code, timeout=timeout)
+                if timed_out:
+                    return f"[Timeout after {timeout}s]" + (f"\n{output}" if output else "")
+                return output or "(no output)"
+
+            return f"[Error: Unsupported literal fallback tool: {tool_name}]"
+
+        def _build_function_list_labels(function_list: list) -> list[str]:
+            labels: list[str] = []
+            for tool_item in function_list:
+                if isinstance(tool_item, str):
+                    labels.append(tool_item)
+                elif isinstance(tool_item, dict):
+                    server_names = sorted((tool_item.get("mcpServers") or {}).keys())
+                    labels.append(f"mcp_config:{','.join(server_names) if server_names else 'none'}")
+                else:
+                    labels.append(type(tool_item).__name__)
+            return labels
+
+        def _make_agent(include_mcp_tools: bool):
+            function_list = _build_agent_function_list(include_mcp_tools=include_mcp_tools)
+            log.info("chat[%s] function_list=%s", stream_id, _build_function_list_labels(function_list))
+            return Assistant(
+                function_list=function_list,
+                llm=get_chat_model(llm_cfg),
+                system_message="",
+            )
+
         try:
             if not QWEN_AGENT_RUNTIME_AVAILABLE:
                 yield f"data: {json.dumps({'type': 'error', 'message': 'qwen-agent runtime is not installed; cannot start Assistant.run()'})}\n\n"
                 return
 
-            # Tool-call mode is configurable because some Ollama model/build combinations buh
-            # only execute tools reliably when qwen-agent handles function-call prompting.
-            raw_api_env = (os.getenv("QWEN_AGENT_USE_RAW_API", "0") or "0").strip().lower()
-            use_raw_api = raw_api_env in {"1", "true", "yes", "on"}
+            # Tool-call mode: enforce native OpenAI-style tool_calls for consistent compatibility.
+            raw_api_env = (os.getenv("QWEN_AGENT_USE_RAW_API", "") or "").strip().lower()
+            if raw_api_env in {"0", "false", "no", "off"}:
+                log.warning(
+                    "chat[%s] QWEN_AGENT_USE_RAW_API=%r requested prompt-injection mode but raw API is enforced",
+                    stream_id,
+                    raw_api_env,
+                )
+            use_raw_api = True
             fncall_prompt_type = (os.getenv("QWEN_AGENT_FNCALL_PROMPT_TYPE", "nous") or "").strip()
 
             generate_cfg: dict = {"use_raw_api": use_raw_api}
-            if fncall_prompt_type:
+            # fncall_prompt_type is for qwen-agent prompt-injection mode only.
+            # In native raw-api mode, providing this can increase protocol drift
+            # (model emitting literal <function=...> text instead of tool_calls).
+            if (not use_raw_api) and fncall_prompt_type:
                 generate_cfg["fncall_prompt_type"] = fncall_prompt_type
 
             # OpenAI-compatible clients reject unknown top-level args like `think`.
             # Pass reasoning toggle via extra_body for backends (e.g. Ollama) that support it.
             if req.think is not None:
                 generate_cfg["extra_body"] = {"think": bool(req.think)}
+            log.info(
+                "chat[%s] llm generate_cfg use_raw_api=%s fncall_prompt_type=%r think=%s",
+                stream_id,
+                use_raw_api,
+                fncall_prompt_type,
+                req.think,
+            )
 
             llm_cfg = {
                 "model": requested_model,
@@ -2391,145 +2862,270 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 "generate_cfg": generate_cfg,
             }
 
-            function_list = _build_agent_function_list(include_mcp_tools=True)
+            include_mcp_for_run = True
             try:
-                agent = Assistant(
-                    function_list=function_list,
-                    llm=get_chat_model(llm_cfg),
-                    system_message="",
-                )
+                agent = _make_agent(include_mcp_tools=include_mcp_for_run)
             except Exception as exc:
                 # Fail-open: if MCP startup fails (missing launcher, server boot failure, etc.),
                 # retry once without MCP so chat remains available.
-                if req.use_mcp_tools:
-                    log.warning("Assistant init with MCP failed; retrying without MCP tools: %s", exc)
-                    agent = Assistant(
-                        function_list=_build_agent_function_list(include_mcp_tools=False),
-                        llm=get_chat_model(llm_cfg),
-                        system_message="",
-                    )
+                if use_mcp_tools:
+                    log.warning("chat[%s] assistant init with MCP failed; retrying without MCP tools: %s", stream_id, exc)
+                    include_mcp_for_run = False
+                    agent = _make_agent(include_mcp_tools=False)
                 else:
                     raise
-            response_iter = agent.run(messages=working_msgs, lang="en")
 
-            prev_content = ""
-            prev_thinking = ""
-            seen_function_messages = 0
+            retry_without_mcp_on_eof = bool(use_mcp_tools and include_mcp_for_run)
 
             while True:
-                has_item, rsp = await asyncio.to_thread(_next_from_iter, response_iter)
-                if not has_item:
+                response_iter = agent.run(messages=working_msgs, lang="en")
+                prev_content = ""
+                prev_thinking = ""
+                seen_function_messages = 0
+                emitted_output = False
+
+                try:
+                    while True:
+                        has_item, rsp = await asyncio.to_thread(_next_from_iter, response_iter)
+                        if not has_item:
+                            break
+                        if not isinstance(rsp, list):
+                            continue
+
+                        # Stream content + reasoning deltas.
+                        # Scan forward through all messages so the LAST non-empty value wins.
+                        # With use_raw_api=True qwen-agent emits separate Message objects for
+                        # reasoning_content and response content (not combined), so a single
+                        # reversed-lookup would miss one of them.  Both plain dicts and qwen-agent
+                        # Message objects (BaseModelCompatibleDict) expose a .get() method.
+                        content_now = prev_content
+                        thinking_now = prev_thinking
+                        for msg in rsp:
+                            if not (hasattr(msg, "get") and msg.get("role") == "assistant"):
+                                continue
+                            c = str(msg.get("content") or "")
+                            t = str(msg.get("reasoning_content") or msg.get("thinking") or "")
+                            if c:
+                                content_now = c
+                            if t:
+                                thinking_now = t
+
+                        # Some models return reasoning inside <think>...</think> tags in content
+                        # instead of reasoning_content. Surface that in the UI thinking stream.
+                        tagged_thinking = [
+                            m.group(1).strip()
+                            for m in THINK_TAG_RE.finditer(content_now)
+                            if m.group(1).strip()
+                        ]
+                        if tagged_thinking:
+                            content_now = THINK_TAG_RE.sub("", content_now).strip()
+                            tagged_text = "\n\n".join(tagged_thinking)
+                            if thinking_now.strip():
+                                thinking_now = f"{thinking_now.strip()}\n\n{tagged_text}"
+                            else:
+                                thinking_now = tagged_text
+
+                        if content_now.startswith(prev_content):
+                            content_delta = content_now[len(prev_content):]
+                        else:
+                            content_delta = content_now
+                        if content_delta:
+                            emitted_output = True
+                            yield f"data: {json.dumps({'type': 'content', 'delta': content_delta})}\n\n"
+
+                        if thinking_now.startswith(prev_thinking):
+                            thinking_delta = thinking_now[len(prev_thinking):]
+                        else:
+                            thinking_delta = thinking_now
+                        if thinking_delta:
+                            emitted_output = True
+                            yield f"data: {json.dumps({'type': 'thinking', 'delta': thinking_delta})}\n\n"
+
+                        prev_content = content_now
+                        prev_thinking = thinking_now
+                        final_content = content_now
+                        all_thinking = thinking_now
+
+                        # Emit tool_call events when assistant tool calls appear in stream snapshots.
+                        # qwen-agent may surface these as either `tool_calls` or a legacy `function_call`.
+                        for msg in rsp:
+                            if not (hasattr(msg, "get") and msg.get("role") == "assistant"):
+                                continue
+
+                            tool_calls = msg.get("tool_calls")
+                            if isinstance(tool_calls, list):
+                                for tc in tool_calls:
+                                    if not isinstance(tc, dict):
+                                        continue
+                                    call_id = str(tc.get("id") or "")
+                                    function_info = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+                                    tool_name = str(function_info.get("name") or tc.get("name") or "")
+                                    args_raw = function_info.get("arguments", tc.get("arguments", {}))
+                                    if isinstance(args_raw, str):
+                                        try:
+                                            args_obj = json.loads(args_raw)
+                                        except Exception:
+                                            args_obj = {"raw": args_raw}
+                                    elif isinstance(args_raw, dict):
+                                        args_obj = args_raw
+                                    else:
+                                        args_obj = {}
+
+                                    if not tool_name:
+                                        continue
+                                    dedupe_key = call_id or f"{tool_name}:{json.dumps(args_obj, sort_keys=True, ensure_ascii=False)}"
+                                    if dedupe_key in seen_tool_call_ids:
+                                        continue
+                                    seen_tool_call_ids.add(dedupe_key)
+                                    yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args_obj})}\n\n"
+
+                            function_call = msg.get("function_call")
+                            if isinstance(function_call, dict):
+                                tool_name = str(function_call.get("name") or "")
+                                args_raw = function_call.get("arguments", {})
+                                if isinstance(args_raw, str):
+                                    try:
+                                        args_obj = json.loads(args_raw)
+                                    except Exception:
+                                        args_obj = {"raw": args_raw}
+                                elif isinstance(args_raw, dict):
+                                    args_obj = args_raw
+                                else:
+                                    args_obj = {}
+                                if tool_name:
+                                    dedupe_key = f"legacy:{tool_name}:{json.dumps(args_obj, sort_keys=True, ensure_ascii=False)}"
+                                    if dedupe_key not in seen_tool_call_ids:
+                                        seen_tool_call_ids.add(dedupe_key)
+                                        yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args_obj})}\n\n"
+
+                        # Track tool execution counts from appended function messages.
+                        # Use hasattr(.get) instead of isinstance(dict) so qwen-agent Message
+                        # objects (returned by the use_raw_api path) are also detected.
+                        function_msgs = [
+                            m for m in rsp
+                            if hasattr(m, "get") and m.get("role") in ("function", "tool")
+                        ]
+                        if len(function_msgs) > seen_function_messages:
+                            for fm in function_msgs[seen_function_messages:]:
+                                tool_name = fm.get("name", "")
+                                tool_content = str(fm.get("content") or "")
+                                tool_preview = re.sub(r"\s+", " ", tool_content).strip()[:300]
+                                log.info(
+                                    "chat[%s] tool_result name=%s bytes=%d preview=%r",
+                                    stream_id,
+                                    tool_name,
+                                    len(tool_content),
+                                    tool_preview,
+                                )
+                                if TOOL_ERROR_RE.search(tool_content):
+                                    log.warning(
+                                        "chat[%s] tool_result indicates error name=%s content=%r",
+                                        stream_id,
+                                        tool_name,
+                                        tool_preview,
+                                    )
+                                tool_ok = not bool(TOOL_ERROR_RE.search(tool_content))
+                                tool_summary = tool_preview if tool_preview else ("ok" if tool_ok else "error")
+                                yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': tool_ok, 'summary': tool_summary})}\n\n"
+                                emitted_output = True
+                                tools_called += 1
+                                if tool_name == "web_search":
+                                    searches_done += 1
+                                if tool_name == "code_interpreter":
+                                    code_runs += 1
+                                elif tool_name == "run_powershell":
+                                    powershell_runs += 1
+                                elif tool_name == "read_file":
+                                    file_reads += 1
+                                elif tool_name in ("write_file", "replace_in_file", "create_directory"):
+                                    file_writes += 1
+                                if tool_name in ("write_file", "replace_in_file"):
+                                    file_content_writes += 1
+                                elif tool_name == "gml_docs_search":
+                                    gml_snippet_count += len(re.findall(r"^\[\d+\]", tool_content, flags=re.MULTILINE))
+                                elif tool_name == "ps_docs_search":
+                                    ps_snippet_count += len(re.findall(r"^\[\d+\]", tool_content, flags=re.MULTILINE))
+                            seen_function_messages = len(function_msgs)
+
                     break
-                if not isinstance(rsp, list):
-                    continue
-
-                # Stream content + reasoning deltas.
-                # Scan forward through all messages so the LAST non-empty value wins.
-                # With use_raw_api=True qwen-agent emits separate Message objects for
-                # reasoning_content and response content (not combined), so a single
-                # reversed-lookup would miss one of them.  Both plain dicts and qwen-agent
-                # Message objects (BaseModelCompatibleDict) expose a .get() method.
-                content_now = prev_content
-                thinking_now = prev_thinking
-                for msg in rsp:
-                    if not (hasattr(msg, "get") and msg.get("role") == "assistant"):
-                        continue
-                    c = str(msg.get("content") or "")
-                    t = str(msg.get("reasoning_content") or msg.get("thinking") or "")
-                    if c:
-                        content_now = c
-                    if t:
-                        thinking_now = t
-
-                # Some models return reasoning inside <think>...</think> tags in content
-                # instead of reasoning_content. Surface that in the UI thinking stream.
-                tagged_thinking = [
-                    m.group(1).strip()
-                    for m in THINK_TAG_RE.finditer(content_now)
-                    if m.group(1).strip()
-                ]
-                if tagged_thinking:
-                    content_now = THINK_TAG_RE.sub("", content_now).strip()
-                    tagged_text = "\n\n".join(tagged_thinking)
-                    if thinking_now.strip():
-                        thinking_now = f"{thinking_now.strip()}\n\n{tagged_text}"
-                    else:
-                        thinking_now = tagged_text
-
-                # Detect pseudo tool tags in the final content delta.  When the
-                # model is in text-narration mode instead of structured tool-call
-                # mode it writes things like <function=list_dir> directly into
-                # the assistant content.  Emit a one-time warning event so the
-                # frontend can surface an actionable message to the user.
-                if content_now and not getattr(event_stream, '_pseudo_tag_warned', False):
-                    pseudo_matches = PSEUDO_TOOL_TAG_RE.findall(content_now)
-                    if pseudo_matches:
-                        event_stream._pseudo_tag_warned = True  # type: ignore[attr-defined]
-                        hint = (
-                            "Tool-mode mismatch: the model is writing tool calls as plain text "
-                            f"({pseudo_matches[0]!r}) instead of executing them. "
-                            "Try toggling QWEN_AGENT_USE_RAW_API (currently "
-                            + str(use_raw_api) + "). "
-                            "Restart the server after changing the value in .env."
+                except Exception as exc:
+                    exc_text = str(exc)
+                    if retry_without_mcp_on_eof and not emitted_output and "EOF" in exc_text:
+                        retry_without_mcp_on_eof = False
+                        include_mcp_for_run = False
+                        log.warning(
+                            "chat[%s] upstream EOF before output; retrying stream once without MCP tools: %s",
+                            stream_id,
+                            exc_text,
                         )
-                        log.warning("Pseudo tool tag detected in assistant content: %s", pseudo_matches[0])
-                        yield f"data: {json.dumps({'type': 'tool_mode_warning', 'message': hint})}\n\n"
-
-                if content_now.startswith(prev_content):
-                    content_delta = content_now[len(prev_content):]
-                else:
-                    content_delta = content_now
-                if content_delta:
-                    yield f"data: {json.dumps({'type': 'content', 'delta': content_delta})}\n\n"
-
-                if thinking_now.startswith(prev_thinking):
-                    thinking_delta = thinking_now[len(prev_thinking):]
-                else:
-                    thinking_delta = thinking_now
-                if thinking_delta:
-                    yield f"data: {json.dumps({'type': 'thinking', 'delta': thinking_delta})}\n\n"
-
-                prev_content = content_now
-                prev_thinking = thinking_now
-                final_content = content_now
-                all_thinking = thinking_now
-
-                # Track tool execution counts from appended function messages.
-                # Use hasattr(.get) instead of isinstance(dict) so qwen-agent Message
-                # objects (returned by the use_raw_api path) are also detected.
-                function_msgs = [
-                    m for m in rsp
-                    if hasattr(m, "get") and m.get("role") in ("function", "tool")
-                ]
-                if len(function_msgs) > seen_function_messages:
-                    for fm in function_msgs[seen_function_messages:]:
-                        tool_name = fm.get("name", "")
-                        tool_content = str(fm.get("content") or "")
-                        tools_called += 1
-                        if tool_name == "code_interpreter":
-                            code_runs += 1
-                        elif tool_name == "read_file":
-                            file_reads += 1
-                        elif tool_name in ("write_file", "replace_in_file", "create_directory"):
-                            file_writes += 1
-                        elif tool_name == "gml_docs_search":
-                            gml_snippet_count += len(re.findall(r"^\[\d+\]", tool_content, flags=re.MULTILINE))
-                        elif tool_name == "ps_docs_search":
-                            ps_snippet_count += len(re.findall(r"^\[\d+\]", tool_content, flags=re.MULTILINE))
-                    seen_function_messages = len(function_msgs)
+                        agent = _make_agent(include_mcp_tools=False)
+                        continue
+                    raise
 
             # Stream completed successfully
             token_count = estimate_tokens(final_content + all_thinking)
-            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'commands_run': code_runs, 'code_runs': code_runs, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': gml_snippet_count > 0, 'gml_snippet_count': gml_snippet_count, 'ps_docs_used': ps_snippet_count > 0, 'ps_docs_snippet_count': ps_snippet_count})}\n\n"
+            literal_fallback = _parse_literal_tool_markup(final_content) if tools_called == 0 else None
+            if literal_fallback is not None:
+                tool_name, args_obj = literal_fallback
+                preview = re.sub(r"\s+", " ", final_content).strip()[:280]
+                log.warning(
+                    "chat[%s] model returned literal tool markup without tool_calls: %r",
+                    stream_id,
+                    preview,
+                )
+                if tool_name in {"code_interpreter", "run_powershell"}:
+                    yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args_obj})}\n\n"
+                    tool_result = await asyncio.to_thread(_execute_literal_tool_call, tool_name, args_obj)
+                    tool_ok = not bool(TOOL_ERROR_RE.search(tool_result))
+                    tool_summary = re.sub(r"\s+", " ", tool_result).strip()[:300]
+                    yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': tool_ok, 'summary': tool_summary if tool_summary else ('ok' if tool_ok else 'error')})}\n\n"
+                    tools_called += 1
+                    if tool_name == "code_interpreter":
+                        code_runs += 1
+                    elif tool_name == "run_powershell":
+                        powershell_runs += 1
+                    cleaned_prefix = _strip_literal_tool_markup(final_content)
+                    final_content = f"{cleaned_prefix}\n\n{tool_result}".strip() if cleaned_prefix else tool_result
+                    fallback_delta = "\n\n" + tool_result
+                    yield f"data: {json.dumps({'type': 'content', 'delta': fallback_delta})}\n\n"
+                    token_count = estimate_tokens(final_content + all_thinking)
+            final_content_preview = re.sub(r"\s+", " ", final_content).strip()[:400]
+            final_thinking_preview = re.sub(r"\s+", " ", all_thinking).strip()[:250]
+            log.info("chat[%s] final_content=%r", stream_id, final_content_preview)
+            if final_thinking_preview:
+                log.info("chat[%s] final_thinking=%r", stream_id, final_thinking_preview)
+            log.info(
+                "chat[%s] done tokens=%d tools=%d code_runs=%d powershell_runs=%d file_reads=%d file_writes=%d",
+                stream_id,
+                token_count,
+                tools_called,
+                code_runs,
+                powershell_runs,
+                file_reads,
+                file_writes,
+            )
+            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'searches_done': searches_done, 'commands_run': code_runs, 'code_runs': code_runs, 'powershell_runs': powershell_runs, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': gml_snippet_count > 0, 'gml_snippet_count': gml_snippet_count, 'ps_docs_used': ps_snippet_count > 0, 'ps_docs_snippet_count': ps_snippet_count})}\n\n"
         except Exception as exc:
-            log.exception("Streaming error")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            log.exception("chat[%s] streaming error", stream_id)
+            error_text = str(exc)
+            error_type = "unknown_error"
+            lowered = error_text.lower()
+            if "permission" in lowered or "workspace" in lowered or "file" in lowered:
+                error_type = "tool_error"
+            elif "tool" in lowered or "function" in lowered:
+                error_type = "tool_error"
+            elif "mcp" in lowered:
+                error_type = "mcp_error"
+            elif "ollama" in lowered or "connection" in lowered or "eof" in lowered:
+                error_type = "connection_error"
+            yield f"data: {json.dumps({'type': 'error', 'error_type': error_type, 'message': error_text})}\n\n"
         finally:
             if final_content or all_thinking:
                 try:
                     await save_messages(db, req.conversation_id, req.message, final_content, all_thinking)
                 except Exception as exc:
-                    log.error("Failed to save messages: %s", exc)
+                    log.error("chat[%s] failed to save messages: %s", stream_id, exc)
+            log.info("chat[%s] stream closed", stream_id)
             await db.close()
 
     return StreamingResponse(
@@ -2544,4 +3140,15 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="0.0.0.0", port=42069, reload=True)
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=42069,
+        reload=True,
+        reload_excludes=[
+            "workspace/tools/code_interpreter/*",
+            "workspace/tools/code_interpreter/**",
+            "**/launch_kernel_*.py",
+            "**/kernel_connection_file_*",
+        ],
+    )

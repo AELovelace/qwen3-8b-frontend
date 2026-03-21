@@ -5,28 +5,106 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>DollChat!</title>
 <style>
+  @font-face {
+    font-family: 'Ferrite';
+    src: url('resources/fonts/ferrite.woff') format('woff');
+    font-weight: 400;
+    font-style: normal;
+  }
+  @font-face {
+    font-family: 'Ming Liu';
+    src: url('resources/fonts/mingliu.woff') format('woff');
+    font-weight: 400;
+    font-style: normal;
+  }
+
   /* ── Reset & base ─────────────────────────────────────────────────── */
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --bg:         #1a1a1a;
-    --surface:    #242424;
-    --surface2:   #2e2e2e;
-    --border:     #3a3a3a;
-    --text:       #e8e8e8;
-    --text-dim:   #888;
-    --accent:     #ff6bf3;
-    --accent-dim: #9c3a8c;
-    --think-bg:   #1e2030;
-    --think-text: #f3c4ed;
-    --user-bg:    #5c2a5a;
+    --bg:         #1f181b;
+    --surface:    rgba(54, 34, 41, 0.72);
+    --surface2:   rgba(78, 50, 59, 0.76);
+    --border:     rgba(248, 190, 201, 0.26);
+    --text:       #fff3f5;
+    --text-dim:   #ddc0c7;
+    --accent:     #be8387;
+    --accent-dim: #9d696e;
+    --think-bg:   rgba(58, 39, 52, 0.86);
+    --think-text: #ffe2e6;
+    --user-bg:    #8f5f72;
     --error:      #ff6b6b;
     --sidebar-w:  240px;
+    --tools-rail-w: 480px;
     --radius:     10px;
+    --toggle-off: #c9b5e8;
+    --toggle-on:  #be8387;
   }
-  html, body { height: 100%; font-family: system-ui, -apple-system, sans-serif; font-size: 14px; background: var(--bg); color: var(--text); }
+  html, body {
+    height: 100%;
+    font-family: 'Ming Liu', system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    color: var(--text);
+  }
+  html {
+    background: var(--bg);
+  }
+  body {
+    background: transparent;
+    position: relative;
+  }
+  h1, h2, h3, h4, h5, h6, #chat-rail-header h1, #tools-rail-header, .setting-group > label {
+    font-family: 'Ferrite', system-ui, -apple-system, sans-serif;
+    letter-spacing: 0.02em;
+  }
+
+  @keyframes crt-scan {
+    0% { transform: translateY(-100%); }
+    100% { transform: translateY(100vh); }
+  }
+  @keyframes crt-flicker {
+    0%, 100% { opacity: 0.18; }
+    50% { opacity: 0.1; }
+  }
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 80;
+    background:
+      repeating-linear-gradient(
+        to bottom,
+        rgba(255, 220, 228, 0.06) 0px,
+        rgba(255, 220, 228, 0.06) 1px,
+        rgba(20, 8, 12, 0.26) 1px,
+        rgba(20, 8, 12, 0.26) 2px,
+        transparent 2px,
+        transparent 4px
+      );
+    mix-blend-mode: screen;
+    opacity: 0.6;
+    animation: crt-flicker 0.14s steps(2, end) infinite;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    inset: -120vh 0 auto 0;
+    height: 140vh;
+    pointer-events: none;
+    z-index: 81;
+    background: linear-gradient(to bottom, transparent 0%, rgba(255, 244, 246, 0.08) 48%, transparent 100%);
+    animation: crt-scan 8s linear infinite;
+  }
 
   /* ── Layout ───────────────────────────────────────────────────────── */
-  #app { display: flex; height: 100vh; overflow: hidden; }
+  #app {
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+    position: relative;
+    z-index: 1;
+    filter: drop-shadow(0.7px 0 rgba(255, 132, 164, 0.17)) drop-shadow(-0.7px 0 rgba(143, 233, 255, 0.14));
+  }
 
   /* ── Left chat rail ───────────────────────────────────────────────── */
   #chat-rail {
@@ -102,8 +180,8 @@
 
   /* ── Right tools rail ─────────────────────────────────────────────── */
   #tools-rail {
-    width: var(--sidebar-w);
-    min-width: var(--sidebar-w);
+    width: var(--tools-rail-w);
+    min-width: var(--tools-rail-w);
     background: var(--surface);
     border-left: 1px solid var(--border);
     display: flex;
@@ -137,6 +215,46 @@
   }
   .setting-group input:focus,
   .setting-group textarea:focus { outline: none; border-color: var(--accent); }
+  .setting-group input[type="checkbox"] {
+    appearance: none;
+    width: 42px;
+    height: 24px;
+    border-radius: 999px;
+    border: 1px solid rgba(0,0,0,0.15);
+    background: var(--toggle-off);
+    display: inline-flex;
+    align-items: center;
+    margin-right: 8px;
+    position: relative;
+    vertical-align: middle;
+    cursor: pointer;
+    transition: background 0.2s ease, box-shadow 0.2s ease;
+    box-shadow: inset 0 1px 4px rgba(0,0,0,0.18);
+  }
+  .setting-group input[type="checkbox"]::before {
+    content: '';
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #fff;
+    position: absolute;
+    left: 2px;
+    top: 2px;
+    transition: left 0.2s ease;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.25);
+  }
+  .setting-group input[type="checkbox"]:checked {
+    background: var(--toggle-on);
+    box-shadow: 0 0 0 1px rgba(190, 131, 135, 0.3), 0 0 10px rgba(190, 131, 135, 0.32);
+  }
+  .setting-group input[type="checkbox"]:checked::before { left: 20px; }
+  .setting-group label:has(input[type="checkbox"]) {
+    display: flex !important;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px !important;
+    color: var(--text) !important;
+  }
   #brave-save-btn,
   #admin-create-invite-btn,
   #admin-persona-save-btn,
@@ -156,6 +274,10 @@
   #admin-create-invite-btn:hover,
   #admin-persona-save-btn:hover,
   #open-admin-panel-btn:hover { border-color: var(--accent); color: var(--text); }
+  #new-chat-btn,
+  #send-btn:not(:disabled) {
+    box-shadow: 0 0 12px rgba(190, 131, 135, 0.35);
+  }
   #brave-status { font-size: 11px; color: var(--text-dim); text-align: center; min-height: 14px; margin-top: 3px; }
 
   /* ── Main area ────────────────────────────────────────────────────── */
@@ -164,6 +286,9 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    background:
+      linear-gradient(rgba(24, 12, 18, 0.58), rgba(24, 12, 18, 0.58)),
+      url('/resources/media/bg.jpg') center / cover no-repeat;
   }
 
   #messages {
@@ -569,6 +694,45 @@
     flex-direction: column;
     gap: 10px;
   }
+  .tool-line {
+    font-family: 'Ming Liu', system-ui, -apple-system, sans-serif;
+    font-size: 12px;
+    line-height: 1.35;
+  }
+  #file-explorer {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface2);
+    min-height: 140px;
+    max-height: 260px;
+    overflow: auto;
+    padding: 6px;
+  }
+  .explorer-head {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .explorer-item {
+    width: 100%;
+    text-align: left;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text);
+    border-radius: 6px;
+    padding: 4px 6px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: 'Ming Liu', system-ui, -apple-system, sans-serif;
+  }
+  .explorer-item:hover {
+    background: rgba(255,255,255,0.06);
+    border-color: var(--border);
+  }
+  .explorer-item.file {
+    cursor: default;
+    opacity: 0.92;
+  }
 
   #admin-modal {
     position: fixed;
@@ -726,6 +890,97 @@
     cursor: pointer;
     font-size: 11px;
   }
+  .admin-explorer-wrap {
+    border: 1px solid rgba(255,255,255,0.09);
+    border-radius: 7px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(0,0,0,0.08);
+  }
+  .admin-explorer-top {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    gap: 6px;
+    align-items: center;
+  }
+  .admin-explorer-path {
+    font-size: 11px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .admin-explorer-btn {
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    background: var(--surface2);
+    border-radius: 6px;
+    padding: 3px 7px;
+    cursor: pointer;
+    font-size: 11px;
+  }
+  .admin-explorer-btn:hover { border-color: var(--accent); color: var(--text); }
+  .admin-explorer-list {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    min-height: 110px;
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .admin-explorer-item {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
+    align-items: center;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 3px 5px;
+    font-size: 11px;
+  }
+  .admin-explorer-item:hover {
+    background: rgba(255,255,255,0.06);
+    border-color: var(--border);
+  }
+  .admin-explorer-item.selected {
+    background: rgba(190,131,135,0.14);
+    border-color: var(--accent-dim);
+  }
+  .admin-explorer-name {
+    background: transparent;
+    border: none;
+    text-align: left;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .admin-explorer-open {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface2);
+    color: var(--text-dim);
+    font-size: 10px;
+    padding: 2px 6px;
+    cursor: pointer;
+  }
+  .admin-explorer-open:hover { border-color: var(--accent); color: var(--text); }
+  .admin-explorer-selected {
+    font-size: 11px;
+    color: var(--text-dim);
+    min-height: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   @media (max-width: 900px) {
     .auth-shell { grid-template-columns: 1fr; }
@@ -865,72 +1120,17 @@
   <!-- ── Left rail: Chats ──────────────────────────────────────────── -->
   <aside id="chat-rail">
     <div id="chat-rail-header">
-      <h1>Ollama Chat</h1>
+      <h1>DollChat!!!</h1>
       <button id="new-chat-btn">+ New Chat</button>
     </div>
     <div id="conv-list"></div>
-    <div id="tools-rail-header">Workspace Tools</div>
+    <div id="tools-rail-header">Account</div>
     <div id="tools-rail-body">
       <div id="account-box">
         <div id="account-role">User</div>
         <div id="account-line">Signed in as <strong id="account-username">-</strong></div>
         <button id="open-admin-panel-btn" type="button" style="display:none;">Open Admin Panel</button>
         <button id="logout-btn" type="button">Log out</button>
-      </div>
-
-      <div id="tooling-config-host">
-        <div id="tooling-config-panel">
-          <div class="setting-group">
-            <label for="model-input">Model</label>
-            <input id="model-input" type="text" value="qwen3-coder:30b" autocomplete="off" spellcheck="false" />
-          </div>
-          <div class="setting-group">
-            <label for="gml-docs-toggle">GameMaker Manual</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-              <input id="gml-docs-toggle" type="checkbox" checked />
-              Use local /indexed-docs/gml markdown for GML guidance
-            </label>
-            <div id="gml-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
-          </div>
-          <div class="setting-group">
-            <label for="ps-docs-toggle">PowerShell Docs</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-              <input id="ps-docs-toggle" type="checkbox" checked />
-              Use local /indexed-docs/ps-docs markdown for PowerShell guidance
-            </label>
-            <div id="ps-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
-          </div>
-          <div class="setting-group">
-            <label for="file-tools-toggle">Agent File Tools</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-              <input id="file-tools-toggle" type="checkbox" />
-              Allow model to read/edit local files
-            </label>
-            <div id="file-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
-          </div>
-          <div class="setting-group">
-            <label for="code-interpreter-toggle">Code Interpreter</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-              <input id="code-interpreter-toggle" type="checkbox" />
-              Execute Python in a sandboxed Docker container
-            </label>
-            <div id="code-interpreter-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
-          </div>
-          <div class="setting-group">
-            <label for="mcp-tools-toggle">MCP Tools</label>
-            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
-              <input id="mcp-tools-toggle" type="checkbox" checked />
-              Include active MCP server tools
-            </label>
-            <div id="mcp-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
-          </div>
-          <div class="setting-group">
-            <label for="brave-key-input">Brave Search API Key</label>
-            <input id="brave-key-input" type="password" placeholder="Paste key here…" autocomplete="off" />
-            <button id="brave-save-btn">Save Key</button>
-            <div id="brave-status"></div>
-          </div>
-        </div>
       </div>
     </div>
   </aside>
@@ -965,7 +1165,81 @@
 
   <!-- ── Right rail: Admin and tools ───────────────────────────────── -->
   <aside id="tools-rail">
-    
+    <div id="tools-rail-header">Workspace Tools</div>
+    <div id="tools-rail-body">
+      <div id="tooling-config-host">
+        <div id="tooling-config-panel">
+          <div class="setting-group">
+            <label for="model-input">Model</label>
+            <input id="model-input" type="text" value="qwen3-coder:30b" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="setting-group">
+            <label for="gml-docs-toggle">GameMaker Manual</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="gml-docs-toggle" type="checkbox" checked />
+              <span class="tool-line">Use local /indexed-docs/gml markdown for GML guidance</span>
+            </label>
+            <div id="gml-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="ps-docs-toggle">PowerShell Docs</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="ps-docs-toggle" type="checkbox" checked />
+              <span class="tool-line">Use local /indexed-docs/ps-docs markdown for PowerShell guidance</span>
+            </label>
+            <div id="ps-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="file-tools-toggle">Agent File Tools</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="file-tools-toggle" type="checkbox" />
+              <span class="tool-line">Allow model to read/edit local files</span>
+            </label>
+            <div id="file-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="code-interpreter-toggle">Code Interpreter</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="code-interpreter-toggle" type="checkbox" />
+              <span class="tool-line">Execute Python in a sandboxed Docker container</span>
+            </label>
+            <div id="code-interpreter-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="powershell-toggle">PowerShell</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="powershell-toggle" type="checkbox" />
+              <span class="tool-line">Run PowerShell in a persistent session (native or Docker)</span>
+            </label>
+            <div id="powershell-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="mcp-tools-toggle">MCP Tools</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="mcp-tools-toggle" type="checkbox" checked />
+              <span class="tool-line">Include active MCP server tools</span>
+            </label>
+            <div id="mcp-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="working-subdir-input">Current Working Subdirectory</label>
+            <input id="working-subdir-input" type="text" placeholder="e.g. src or project/subdir (blank = workspace root)" autocomplete="off" />
+            <button id="working-subdir-apply-btn" type="button">Apply Subdirectory</button>
+            <div id="working-subdir-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label>File Explorer</label>
+            <div id="file-explorer"></div>
+          </div>
+          <div class="setting-group">
+            <label for="brave-key-input">Brave Search API Key</label>
+            <input id="brave-key-input" type="password" placeholder="Paste key here…" autocomplete="off" />
+            <button id="brave-save-btn">Save Key</button>
+            <div id="brave-status"></div>
+          </div>
+        </div>
+      </div>
+    </div>
   </aside>
 
   <div id="admin-modal" aria-hidden="true">
@@ -983,7 +1257,62 @@
             <button id="admin-persona-save-btn" type="button">Save Persona</button>
             <div id="admin-persona-status"></div>
           </div>
-          <div id="admin-tooling-host"></div>
+          <div id="admin-tooling-host">
+            <h4>Global Tool Toggles</h4>
+            <div class="setting-group">
+              <label for="admin-global-gml-toggle">GameMaker Manual</label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+                <input id="admin-global-gml-toggle" type="checkbox" checked />
+                <span class="tool-line">Use local /indexed-docs/gml markdown for GML guidance</span>
+              </label>
+            </div>
+            <div class="setting-group">
+              <label for="admin-global-ps-toggle">PowerShell Docs</label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+                <input id="admin-global-ps-toggle" type="checkbox" checked />
+                <span class="tool-line">Use local /indexed-docs/ps-docs markdown for PowerShell guidance</span>
+              </label>
+            </div>
+            <div class="setting-group">
+              <label for="admin-global-file-toggle">Agent File Tools</label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+                <input id="admin-global-file-toggle" type="checkbox" checked />
+                <span class="tool-line">Allow model to read/edit local files</span>
+              </label>
+            </div>
+            <div class="setting-group">
+              <label for="admin-global-ci-toggle">Code Interpreter</label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+                <input id="admin-global-ci-toggle" type="checkbox" checked />
+                <span class="tool-line">Execute Python in a sandboxed Docker container</span>
+              </label>
+            </div>
+            <div class="setting-group">
+              <label for="admin-global-ps-exec-select">PowerShell Execution</label>
+              <select id="admin-global-ps-exec-select" style="margin-top:4px;">
+                <option value="off">Off</option>
+                <option value="native">Native (pwsh / powershell.exe)</option>
+                <option value="docker">Docker (mcr.microsoft.com/powershell:latest)</option>
+              </select>
+              <div id="admin-global-ps-exec-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+            </div>
+            <div class="setting-group">
+              <label for="admin-global-mcp-toggle">MCP Tools</label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+                <input id="admin-global-mcp-toggle" type="checkbox" checked />
+                <span class="tool-line">Include active MCP server tools</span>
+              </label>
+            </div>
+            <div class="setting-group">
+              <label for="admin-global-raw-api-toggle">Native Tool-Calling (Raw API)</label>
+              <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+                <input id="admin-global-raw-api-toggle" type="checkbox" checked disabled />
+                <span class="tool-line">Always on: use OpenAI-style tool_calls for consistent compatibility</span>
+              </label>
+            </div>
+            <button id="admin-global-tools-save-btn" type="button">Save Global Toggles</button>
+            <div id="admin-global-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
         </section>
 
         <section class="admin-modal-col">
@@ -1054,8 +1383,14 @@ const fileToolsToggle = document.getElementById('file-tools-toggle');
 const fileToolsStatusEl = document.getElementById('file-tools-status');
 const codeInterpreterToggle = document.getElementById('code-interpreter-toggle');
 const codeInterpreterStatusEl = document.getElementById('code-interpreter-status');
+const powershellToggle = document.getElementById('powershell-toggle');
+const powershellStatusEl = document.getElementById('powershell-status');
 const mcpToolsToggle = document.getElementById('mcp-tools-toggle');
 const mcpToolsStatusEl = document.getElementById('mcp-tools-status');
+const workingSubdirInput = document.getElementById('working-subdir-input');
+const workingSubdirApplyBtn = document.getElementById('working-subdir-apply-btn');
+const workingSubdirStatusEl = document.getElementById('working-subdir-status');
+const fileExplorerEl = document.getElementById('file-explorer');
 const newChatBtn = document.getElementById('new-chat-btn');
 
 const accountUsernameEl = document.getElementById('account-username');
@@ -1068,6 +1403,15 @@ const toolingConfigPanelEl = document.getElementById('tooling-config-panel');
 const adminModalEl = document.getElementById('admin-modal');
 const adminModalCloseBtn = document.getElementById('admin-modal-close-btn');
 const adminToolingHostEl = document.getElementById('admin-tooling-host');
+const adminGlobalGmlToggle = document.getElementById('admin-global-gml-toggle');
+const adminGlobalPsToggle = document.getElementById('admin-global-ps-toggle');
+const adminGlobalFileToggle = document.getElementById('admin-global-file-toggle');
+const adminGlobalCiToggle = document.getElementById('admin-global-ci-toggle');
+const adminGlobalPsExecSelect = document.getElementById('admin-global-ps-exec-select');
+const adminGlobalMcpToggle = document.getElementById('admin-global-mcp-toggle');
+const adminGlobalRawApiToggle = document.getElementById('admin-global-raw-api-toggle');
+const adminGlobalToolsSaveBtn = document.getElementById('admin-global-tools-save-btn');
+const adminGlobalToolsStatusEl = document.getElementById('admin-global-tools-status');
 const adminPersonaInputEl = document.getElementById('admin-persona-input');
 const adminPersonaSaveBtn = document.getElementById('admin-persona-save-btn');
 const adminPersonaStatusEl = document.getElementById('admin-persona-status');
@@ -1095,14 +1439,136 @@ function setAuthToken(token) {
   }
 }
 
+function getUserPrefsKey() {
+  return currentUser ? `tool_prefs_${currentUser.id}` : '';
+}
+
+function loadUserToolPreferences() {
+  const key = getUserPrefsKey();
+  if (!key) return;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return;
+    const prefs = JSON.parse(raw);
+    if (typeof prefs.use_gml_docs === 'boolean') gmlDocsToggle.checked = prefs.use_gml_docs;
+    if (typeof prefs.use_ps_docs === 'boolean') psDocsToggle.checked = prefs.use_ps_docs;
+    if (typeof prefs.use_file_tools === 'boolean') fileToolsToggle.checked = prefs.use_file_tools;
+    if (typeof prefs.use_code_interpreter === 'boolean') codeInterpreterToggle.checked = prefs.use_code_interpreter;
+    if (typeof prefs.use_powershell === 'boolean') powershellToggle.checked = prefs.use_powershell;
+    if (typeof prefs.use_mcp_tools === 'boolean') mcpToolsToggle.checked = prefs.use_mcp_tools;
+  } catch {}
+}
+
+function saveUserToolPreferences() {
+  const key = getUserPrefsKey();
+  if (!key) return;
+  const prefs = {
+    use_gml_docs: gmlDocsToggle.checked,
+    use_ps_docs: psDocsToggle.checked,
+    use_file_tools: fileToolsToggle.checked,
+    use_code_interpreter: codeInterpreterToggle.checked,
+    use_powershell: powershellToggle.checked,
+    use_mcp_tools: mcpToolsToggle.checked,
+  };
+  localStorage.setItem(key, JSON.stringify(prefs));
+}
+
+function getWorkingSubdirKey() {
+  return currentUser ? `working_subdir_${currentUser.id}` : '';
+}
+
+function getWorkingSubdir() {
+  const key = getWorkingSubdirKey();
+  if (!key) return '';
+  return (localStorage.getItem(key) || '').trim();
+}
+
+function setWorkingSubdir(value) {
+  const key = getWorkingSubdirKey();
+  if (!key) return;
+  const normalized = (value || '').trim();
+  localStorage.setItem(key, normalized);
+}
+
+function setWorkingSubdirStatus(message, isError = false) {
+  if (!workingSubdirStatusEl) return;
+  workingSubdirStatusEl.textContent = message;
+  workingSubdirStatusEl.style.color = isError ? 'var(--error)' : 'var(--text-dim)';
+}
+
+function renderFileExplorer(cwd, entries) {
+  if (!fileExplorerEl) return;
+  fileExplorerEl.innerHTML = '';
+
+  const head = document.createElement('div');
+  head.className = 'explorer-head';
+  head.textContent = `cwd: ${cwd}`;
+  fileExplorerEl.appendChild(head);
+
+  if (cwd !== '.') {
+    const up = document.createElement('button');
+    up.className = 'explorer-item';
+    up.textContent = '📁 ..';
+    up.addEventListener('click', () => loadFileExplorer('..'));
+    fileExplorerEl.appendChild(up);
+  }
+
+  for (const entry of entries) {
+    const item = document.createElement('button');
+    item.className = `explorer-item ${entry.is_dir ? 'dir' : 'file'}`;
+    item.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
+    if (entry.is_dir) {
+      item.addEventListener('click', () => loadFileExplorer(entry.path));
+    } else {
+      item.disabled = true;
+    }
+    fileExplorerEl.appendChild(item);
+  }
+}
+
+async function loadFileExplorer(path = '.') {
+  if (!fileExplorerEl || !currentUser) return;
+  try {
+    const subdir = getWorkingSubdir();
+    const query = new URLSearchParams({ path, working_subdir: subdir }).toString();
+    const res = await apiFetch(`/api/file-tools/list?${query}`);
+    const data = await res.json();
+    const normalizedSubdir = (data.working_subdir || '').trim();
+    setWorkingSubdir(normalizedSubdir);
+    if (workingSubdirInput) workingSubdirInput.value = normalizedSubdir;
+    renderFileExplorer(data.cwd || '.', data.entries || []);
+    setWorkingSubdirStatus(normalizedSubdir ? `Using subdirectory: ${normalizedSubdir}` : 'Using workspace root');
+  } catch (err) {
+    fileExplorerEl.innerHTML = `<div class="explorer-head" style="color:var(--error);">${err.message || 'Could not load explorer'}</div>`;
+  }
+}
+
+async function loadAdminGlobalTooling() {
+  if (!currentUser || currentUser.role !== 'admin') return;
+  try {
+    const res = await apiFetch('/api/admin/global-tooling');
+    const data = await res.json();
+    adminGlobalGmlToggle.checked = !!data.use_gml_docs;
+    adminGlobalPsToggle.checked = !!data.use_ps_docs;
+    adminGlobalFileToggle.checked = !!data.use_file_tools;
+    adminGlobalCiToggle.checked = !!data.use_code_interpreter;
+    adminGlobalPsExecSelect.value = data.use_powershell || 'off';
+    adminGlobalMcpToggle.checked = !!data.use_mcp_tools;
+    adminGlobalRawApiToggle.checked = true;
+    adminGlobalRawApiToggle.disabled = true;
+    adminGlobalToolsStatusEl.textContent = 'Global toggles loaded';
+    adminGlobalToolsStatusEl.style.color = 'var(--text-dim)';
+  } catch (err) {
+    adminGlobalToolsStatusEl.textContent = err.message || 'Could not load global toggles';
+    adminGlobalToolsStatusEl.style.color = 'var(--error)';
+  }
+}
+
 function showAuthGate(message = '') {
   appEl.style.display = 'none';
   authGateEl.style.display = 'flex';
   closeAdminModal();
   openAdminPanelBtn.style.display = 'none';
-  if (toolingConfigPanelEl.parentElement !== toolingConfigHostEl) {
-    toolingConfigHostEl.appendChild(toolingConfigPanelEl);
-  }
   authStatusEl.textContent = message;
   authStatusEl.style.color = message ? 'var(--text)' : 'var(--text-dim)';
 }
@@ -1193,22 +1659,22 @@ async function applyAuthenticatedState(user) {
 
   accountUsernameEl.textContent = user.username;
   accountRoleEl.textContent = user.role;
-  openAdminPanelBtn.style.display = 'block';
+  openAdminPanelBtn.style.display = isAdmin ? 'block' : 'none';
   adminPanelEl.style.display = isAdmin ? 'flex' : 'none';
+  loadUserToolPreferences();
+
+  if (workingSubdirInput) {
+    workingSubdirInput.value = getWorkingSubdir();
+  }
 
   if (isAdmin) {
     adminPersonaInputEl.value = user.persona_prompt || '';
     setAdminPersonaStatus('');
-    if (toolingConfigPanelEl.parentElement !== adminToolingHostEl) {
-      adminToolingHostEl.appendChild(toolingConfigPanelEl);
-    }
+    await loadAdminGlobalTooling();
   } else {
     adminPersonaInputEl.value = '';
     setAdminPersonaStatus('');
     closeAdminModal();
-    if (toolingConfigPanelEl.parentElement !== toolingConfigHostEl) {
-      toolingConfigHostEl.appendChild(toolingConfigPanelEl);
-    }
   }
 
   if (user.file_tools_enabled) {
@@ -1241,6 +1707,32 @@ async function applyAuthenticatedState(user) {
     }
   } catch (_) {}
 
+  // PowerShell session status
+  try {
+    const psRes = await apiFetch('/api/powershell/status');
+    if (psRes.ok) {
+      const ps = await psRes.json();
+      if (ps.available) {
+        powershellToggle.disabled = false;
+        powershellStatusEl.style.color = 'var(--accent)';
+        const modeLabel = ps.mode === 'docker' ? 'Docker' : 'Native';
+        powershellStatusEl.textContent = `${modeLabel}: ${ps.executable || 'pwsh'} — session ready.`;
+      } else if (ps.mode !== 'off') {
+        powershellToggle.checked = false;
+        powershellToggle.disabled = true;
+        powershellStatusEl.style.color = 'var(--text-dim)';
+        powershellStatusEl.textContent = ps.mode === 'docker'
+          ? 'Docker not detected. Install Docker Desktop to enable.'
+          : 'PowerShell (pwsh) not found in PATH.';
+      } else {
+        powershellToggle.checked = false;
+        powershellToggle.disabled = true;
+        powershellStatusEl.style.color = 'var(--text-dim)';
+        powershellStatusEl.textContent = 'Disabled globally. Enable in Admin → PowerShell Execution.';
+      }
+    }
+  } catch (_) {}
+
   // MCP tools status
   try {
     const mcpRes = await apiFetch('/api/mcp-config');
@@ -1263,6 +1755,12 @@ async function applyAuthenticatedState(user) {
     await loadAdminUsers();
   }
   await loadMcpAdminPanel();
+
+  if (user.file_tools_enabled) {
+    await loadFileExplorer('.');
+  } else if (fileExplorerEl) {
+    fileExplorerEl.innerHTML = '<div class="explorer-head">Enable Agent File Tools to use explorer.</div>';
+  }
 
   showApp();
   clearMessages();
@@ -1671,7 +2169,9 @@ async function handleSend() {
         use_ps_docs: psDocsToggle.checked,
         use_file_tools: fileToolsToggle.checked,
         use_code_interpreter: codeInterpreterToggle.checked,
+        use_powershell: powershellToggle.checked,
         use_mcp_tools: mcpToolsToggle.checked,
+        working_subdir: getWorkingSubdir(),
       }),
       throwOnError: false,
     });
@@ -1721,6 +2221,15 @@ async function handleSend() {
             hasContent = true;
           }
           assistantRawContent += evt.delta;
+          renderAssistantBubble(contentBubble, assistantRawContent);
+          scrollToBottom();
+
+        } else if (evt.type === 'content_replace') {
+          if (!hasContent) {
+            spinner.style.display = 'none';
+            hasContent = true;
+          }
+          assistantRawContent = String(evt.content || '');
           renderAssistantBubble(contentBubble, assistantRawContent);
           scrollToBottom();
 
@@ -1805,23 +2314,6 @@ async function handleSend() {
             const textEl = ind.querySelector('span:last-child');
             if (textEl) textEl.textContent = `${evt.ok ? 'Done' : 'Failed'}: ${evt.name} - ${evt.summary || ''}`;
           }
-          scrollToBottom();
-
-        } else if (evt.type === 'tool_mode_warning') {
-          // Model is narrating tool calls as plain text instead of executing them.
-          // Render a non-fatal inline warning banner above the response content.
-          const banner = document.createElement('div');
-          banner.style.cssText = [
-            'margin-bottom:8px',
-            'padding:6px 10px',
-            'border-radius:6px',
-            'font-size:12px',
-            'background:rgba(255,180,0,0.12)',
-            'border:1px solid rgba(255,180,0,0.4)',
-            'color:#e6a817',
-          ].join(';');
-          banner.textContent = '⚠ ' + evt.message;
-          contentBubble.parentNode.insertBefore(banner, contentBubble);
           scrollToBottom();
 
         } else if (evt.type === 'error') {
@@ -1918,6 +2410,32 @@ braveSaveBtn.addEventListener('click', async () => {
 function setAdminStatus(message, isError = false) {
   adminStatusEl.textContent = message;
   adminStatusEl.style.color = isError ? 'var(--error)' : 'var(--text-dim)';
+}
+
+function adminParentPath(path) {
+  const raw = (path || '').trim();
+  if (!raw) return '';
+  const normalized = raw.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!normalized) return '';
+  if (/^[a-zA-Z]:$/.test(normalized)) return `${normalized}/`;
+  const idx = normalized.lastIndexOf('/');
+  if (idx <= 0) return normalized;
+  const parent = normalized.slice(0, idx);
+  return /^[a-zA-Z]:$/.test(parent) ? `${parent}/` : parent;
+}
+
+function resolveAdminSelectedCwd(path, isDir) {
+  const raw = (path || '').trim();
+  if (!raw) return '';
+  if (isDir) return raw;
+  return adminParentPath(raw);
+}
+
+async function loadAdminFilesystem(path = '') {
+  const query = new URLSearchParams();
+  if (path && path.trim()) query.set('path', path.trim());
+  const res = await apiFetch(`/api/admin/fs/list?${query.toString()}`);
+  return res.json();
 }
 
 async function loadAdminUsers() {
@@ -2071,6 +2589,169 @@ function renderAdminUsers(users) {
 
     row.appendChild(controls);
 
+    const explorerWrap = document.createElement('div');
+    explorerWrap.className = 'admin-explorer-wrap';
+
+    const explorerTop = document.createElement('div');
+    explorerTop.className = 'admin-explorer-top';
+
+    const explorerPath = document.createElement('div');
+    explorerPath.className = 'admin-explorer-path';
+    explorerPath.textContent = 'Explorer path: -';
+
+    const explorerUpBtn = document.createElement('button');
+    explorerUpBtn.className = 'admin-explorer-btn';
+    explorerUpBtn.type = 'button';
+    explorerUpBtn.textContent = 'Up';
+
+    const explorerRefreshBtn = document.createElement('button');
+    explorerRefreshBtn.className = 'admin-explorer-btn';
+    explorerRefreshBtn.type = 'button';
+    explorerRefreshBtn.textContent = 'Refresh';
+
+    explorerTop.appendChild(explorerPath);
+    explorerTop.appendChild(explorerUpBtn);
+    explorerTop.appendChild(explorerRefreshBtn);
+    explorerWrap.appendChild(explorerTop);
+
+    const explorerList = document.createElement('div');
+    explorerList.className = 'admin-explorer-list';
+    explorerWrap.appendChild(explorerList);
+
+    const explorerSelected = document.createElement('div');
+    explorerSelected.className = 'admin-explorer-selected';
+    explorerSelected.textContent = 'Selected: none';
+    explorerWrap.appendChild(explorerSelected);
+
+    const setCwdBtn = document.createElement('button');
+    setCwdBtn.className = 'admin-save-btn';
+    setCwdBtn.type = 'button';
+    setCwdBtn.textContent = 'Set Selected as CWD';
+    setCwdBtn.disabled = true;
+    explorerWrap.appendChild(setCwdBtn);
+
+    let explorerCurrentPath = '';
+    let explorerParentPath = '';
+    let selectedPath = '';
+    let selectedIsDir = false;
+
+    function updateSelectedPreview() {
+      if (!selectedPath) {
+        explorerSelected.textContent = 'Selected: none';
+        setCwdBtn.disabled = true;
+        return;
+      }
+      const resolved = resolveAdminSelectedCwd(selectedPath, selectedIsDir);
+      explorerSelected.textContent = resolved ? `Selected: ${selectedPath}` : 'Selected: none';
+      setCwdBtn.disabled = !resolved;
+    }
+
+    async function refreshAdminExplorer(path = '') {
+      explorerRefreshBtn.disabled = true;
+      explorerUpBtn.disabled = true;
+      explorerList.innerHTML = '<div class="admin-user-meta">Loading...</div>';
+      try {
+        const data = await loadAdminFilesystem(path);
+        explorerCurrentPath = (data.current_path || '').trim();
+        explorerParentPath = (data.parent_path || '').trim();
+        const entries = Array.isArray(data.entries) ? data.entries : [];
+
+        explorerPath.textContent = explorerCurrentPath ? `Explorer path: ${explorerCurrentPath}` : 'Explorer path: drives';
+        explorerUpBtn.disabled = !explorerParentPath;
+
+        explorerList.innerHTML = '';
+        if (!entries.length) {
+          const empty = document.createElement('div');
+          empty.className = 'admin-user-meta';
+          empty.textContent = 'No items';
+          explorerList.appendChild(empty);
+        } else {
+          for (const entry of entries) {
+            const item = document.createElement('div');
+            item.className = 'admin-explorer-item';
+            if (entry.path === selectedPath) {
+              item.classList.add('selected');
+            }
+
+            const selectBtn = document.createElement('button');
+            selectBtn.className = 'admin-explorer-name';
+            selectBtn.type = 'button';
+            selectBtn.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
+            selectBtn.title = entry.path || '';
+            selectBtn.addEventListener('click', () => {
+              selectedPath = entry.path || '';
+              selectedIsDir = !!entry.is_dir;
+              updateSelectedPreview();
+              for (const child of explorerList.children) {
+                child.classList.remove('selected');
+              }
+              item.classList.add('selected');
+            });
+            item.appendChild(selectBtn);
+
+            if (entry.is_dir) {
+              const openBtn = document.createElement('button');
+              openBtn.className = 'admin-explorer-open';
+              openBtn.type = 'button';
+              openBtn.textContent = 'Open';
+              openBtn.addEventListener('click', () => refreshAdminExplorer(entry.path || ''));
+              item.appendChild(openBtn);
+            } else {
+              const spacer = document.createElement('div');
+              item.appendChild(spacer);
+            }
+
+            explorerList.appendChild(item);
+          }
+        }
+      } catch (err) {
+        explorerList.innerHTML = `<div class="admin-user-meta" style="color:var(--error);">${err.message || 'Could not load explorer'}</div>`;
+      } finally {
+        explorerRefreshBtn.disabled = false;
+        explorerUpBtn.disabled = !explorerParentPath;
+      }
+    }
+
+    explorerUpBtn.addEventListener('click', () => {
+      if (!explorerParentPath) return;
+      refreshAdminExplorer(explorerParentPath);
+    });
+    explorerRefreshBtn.addEventListener('click', () => {
+      refreshAdminExplorer(explorerCurrentPath || rootInput.value.trim() || '');
+    });
+
+    setCwdBtn.addEventListener('click', async () => {
+      const nextRoot = resolveAdminSelectedCwd(selectedPath, selectedIsDir);
+      if (!nextRoot) return;
+      setCwdBtn.disabled = true;
+      try {
+        await apiFetch(`/api/admin/users/${user.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_tools_enabled: toolsToggle.checked,
+            workspace_root: nextRoot,
+          }),
+        });
+        rootInput.value = nextRoot;
+        setAdminStatus(`Set current working directory for ${user.username}`);
+        if (currentUser && currentUser.id === user.id) {
+          currentUser.file_tools_enabled = toolsToggle.checked;
+          currentUser.workspace_root = nextRoot;
+          await applyAuthenticatedState(currentUser);
+        }
+      } catch (err) {
+        setAdminStatus(err.message || 'Could not set current working directory', true);
+      } finally {
+        setCwdBtn.disabled = false;
+      }
+    });
+
+    const initialExplorerPath = rootInput.value.trim();
+    refreshAdminExplorer(initialExplorerPath);
+
+    row.appendChild(explorerWrap);
+
     adminUsersEl.appendChild(row);
   }
 }
@@ -2139,6 +2820,56 @@ document.addEventListener('keydown', event => {
   }
 });
 adminPersonaSaveBtn.addEventListener('click', saveAdminPersonaPrompt);
+
+[gmlDocsToggle, psDocsToggle, fileToolsToggle, codeInterpreterToggle, powershellToggle, mcpToolsToggle]
+  .forEach(el => el.addEventListener('change', saveUserToolPreferences));
+
+if (workingSubdirApplyBtn) {
+  workingSubdirApplyBtn.addEventListener('click', async () => {
+    const subdir = (workingSubdirInput?.value || '').trim();
+    workingSubdirApplyBtn.disabled = true;
+    setWorkingSubdirStatus('Applying subdirectory...');
+    try {
+      setWorkingSubdir(subdir);
+      await loadFileExplorer('.');
+      setWorkingSubdirStatus(subdir ? `Subdirectory set: ${subdir}` : 'Subdirectory cleared (workspace root)');
+    } catch (err) {
+      setWorkingSubdirStatus(err.message || 'Could not apply subdirectory', true);
+    } finally {
+      workingSubdirApplyBtn.disabled = false;
+    }
+  });
+}
+
+if (adminGlobalToolsSaveBtn) {
+  adminGlobalToolsSaveBtn.addEventListener('click', async () => {
+    adminGlobalToolsSaveBtn.disabled = true;
+    adminGlobalToolsStatusEl.textContent = 'Saving global toggles...';
+    adminGlobalToolsStatusEl.style.color = 'var(--text-dim)';
+    try {
+      await apiFetch('/api/admin/global-tooling', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          use_gml_docs: adminGlobalGmlToggle.checked,
+          use_ps_docs: adminGlobalPsToggle.checked,
+          use_file_tools: adminGlobalFileToggle.checked,
+          use_code_interpreter: adminGlobalCiToggle.checked,
+          use_powershell: adminGlobalPsExecSelect.value,
+          use_mcp_tools: adminGlobalMcpToggle.checked,
+          use_raw_api: true,
+        }),
+      });
+      adminGlobalToolsStatusEl.textContent = 'Global toggles saved';
+      adminGlobalToolsStatusEl.style.color = 'var(--accent)';
+    } catch (err) {
+      adminGlobalToolsStatusEl.textContent = err.message || 'Failed to save global toggles';
+      adminGlobalToolsStatusEl.style.color = 'var(--error)';
+    } finally {
+      adminGlobalToolsSaveBtn.disabled = false;
+    }
+  });
+}
 
 /* ── Init ───────────────────────────────────────────────────────────── */
 (async () => {
