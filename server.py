@@ -2369,7 +2369,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 yield f"data: {json.dumps({'type': 'error', 'message': 'qwen-agent runtime is not installed; cannot start Assistant.run()'})}\n\n"
                 return
 
-            # Tool-call mode is configurable because some Ollama model/build combinations
+            # Tool-call mode is configurable because some Ollama model/build combinations buh
             # only execute tools reliably when qwen-agent handles function-call prompting.
             raw_api_env = (os.getenv("QWEN_AGENT_USE_RAW_API", "0") or "0").strip().lower()
             use_raw_api = raw_api_env in {"1", "true", "yes", "on"}
