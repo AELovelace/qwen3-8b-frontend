@@ -882,7 +882,7 @@
         <div id="tooling-config-panel">
           <div class="setting-group">
             <label for="model-input">Model</label>
-            <input id="model-input" type="text" value="goekdenizguelmez/JOSIEFIED-Qwen3:8b" autocomplete="off" spellcheck="false" />
+            <input id="model-input" type="text" value="qwen3-coder:30b" autocomplete="off" spellcheck="false" />
           </div>
           <div class="setting-group">
             <label for="gml-docs-toggle">GameMaker Manual</label>
@@ -907,6 +907,22 @@
               Allow model to read/edit local files
             </label>
             <div id="file-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="code-interpreter-toggle">Code Interpreter</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="code-interpreter-toggle" type="checkbox" />
+              Execute Python in a sandboxed Docker container
+            </label>
+            <div id="code-interpreter-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label for="mcp-tools-toggle">MCP Tools</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="mcp-tools-toggle" type="checkbox" checked />
+              Include active MCP server tools
+            </label>
+            <div id="mcp-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
           </div>
           <div class="setting-group">
             <label for="brave-key-input">Brave Search API Key</label>
@@ -987,6 +1003,21 @@
             <div id="admin-status"></div>
             <div id="admin-users"></div>
           </div>
+          <hr style="border:none;border-top:1px solid var(--border);margin:18px 0;" />
+          <div id="mcp-admin-panel">
+            <h3>MCP Servers</h3>
+            <p style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">
+              Configure external Model Context Protocol servers. Changes take effect immediately.
+            </p>
+            <div class="setting-group">
+              <label for="mcp-config-editor">mcpServers JSON</label>
+              <textarea id="mcp-config-editor" spellcheck="false" style="font-family:monospace;font-size:12px;height:180px;"
+                placeholder='{\n  "mcpServers": {\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}'></textarea>
+              <button id="mcp-save-btn" type="button">Save &amp; Reinitialise</button>
+              <div id="mcp-save-status" style="font-size:11px;margin-top:4px;"></div>
+            </div>
+            <div id="mcp-active-tools" style="font-size:12px;color:var(--text-dim);margin-top:6px;"></div>
+          </div>
         </section>
       </div>
     </div>
@@ -1021,6 +1052,10 @@ const psDocsToggle = document.getElementById('ps-docs-toggle');
 const psStatusEl = document.getElementById('ps-status');
 const fileToolsToggle = document.getElementById('file-tools-toggle');
 const fileToolsStatusEl = document.getElementById('file-tools-status');
+const codeInterpreterToggle = document.getElementById('code-interpreter-toggle');
+const codeInterpreterStatusEl = document.getElementById('code-interpreter-status');
+const mcpToolsToggle = document.getElementById('mcp-tools-toggle');
+const mcpToolsStatusEl = document.getElementById('mcp-tools-status');
 const newChatBtn = document.getElementById('new-chat-btn');
 
 const accountUsernameEl = document.getElementById('account-username');
@@ -1158,7 +1193,7 @@ async function applyAuthenticatedState(user) {
 
   accountUsernameEl.textContent = user.username;
   accountRoleEl.textContent = user.role;
-  openAdminPanelBtn.style.display = isAdmin ? 'block' : 'none';
+  openAdminPanelBtn.style.display = 'block';
   adminPanelEl.style.display = isAdmin ? 'flex' : 'none';
 
   if (isAdmin) {
@@ -1188,9 +1223,46 @@ async function applyAuthenticatedState(user) {
     fileToolsStatusEl.textContent = 'Disabled for your account. Ask an admin to enable access.';
   }
 
+  // Code interpreter status
+  try {
+    const ciRes = await apiFetch('/api/code-interpreter/status');
+    if (ciRes.ok) {
+      const ci = await ciRes.json();
+      if (ci.available) {
+        codeInterpreterToggle.disabled = false;
+        codeInterpreterStatusEl.style.color = 'var(--accent)';
+        codeInterpreterStatusEl.textContent = 'Docker available — sandbox ready.';
+      } else {
+        codeInterpreterToggle.checked = false;
+        codeInterpreterToggle.disabled = true;
+        codeInterpreterStatusEl.style.color = 'var(--text-dim)';
+        codeInterpreterStatusEl.textContent = 'Docker not detected. Install Docker Desktop to enable.';
+      }
+    }
+  } catch (_) {}
+
+  // MCP tools status
+  try {
+    const mcpRes = await apiFetch('/api/mcp-config');
+    if (mcpRes.ok) {
+      const mcp = await mcpRes.json();
+      if (mcp.tools_count > 0) {
+        mcpToolsStatusEl.style.color = 'var(--accent)';
+        mcpToolsStatusEl.textContent = `${mcp.tools_count} tool(s) active: ${mcp.tools_active.map(t => t.name).join(', ')}`;
+      } else {
+        mcpToolsStatusEl.style.color = 'var(--text-dim)';
+        mcpToolsStatusEl.textContent = 'No MCP servers configured. Open the control panel to add yours.';
+      }
+    } else {
+      mcpToolsStatusEl.style.color = 'var(--text-dim)';
+      mcpToolsStatusEl.textContent = 'MCP status unavailable.';
+    }
+  } catch (_) {}
+
   if (isAdmin) {
     await loadAdminUsers();
   }
+  await loadMcpAdminPanel();
 
   showApp();
   clearMessages();
@@ -1503,7 +1575,7 @@ function appendAssistantMessage(initialContent = '', initialThinking = '', withC
   spinner.className = 'think-spinner';
   if (!withCursor) spinner.style.display = 'none';
   summary.appendChild(spinner);
-  summary.append(' Thinking...');
+  summary.append(' Reasoning');
 
   const thinkingContent = document.createElement('div');
   thinkingContent.className = 'thinking-content';
@@ -1585,29 +1657,6 @@ async function handleSend() {
   const activeSearchEls = new Map();
   const pendingToolEls = new Map();
 
-  async function submitCommandApproval(cmdId, approved, card, statusEl) {
-    try {
-      await apiFetch('/api/chat/command-approval', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cmd_id: cmdId, approved }),
-      });
-      if (statusEl) {
-        statusEl.textContent = approved ? 'Approved. Command running...' : 'Denied. Model will continue without execution.';
-        statusEl.style.color = approved ? '#7ecb6f' : 'var(--text-dim)';
-      }
-      if (card) {
-        const buttons = card.querySelectorAll('button');
-        buttons.forEach(btn => { btn.disabled = true; });
-      }
-    } catch (err) {
-      if (statusEl) {
-        statusEl.textContent = `Approval failed: ${err.message || err}`;
-        statusEl.style.color = 'var(--error)';
-      }
-    }
-  }
-
   try {
     const res = await apiFetch('/api/chat', {
       method: 'POST',
@@ -1615,12 +1664,14 @@ async function handleSend() {
       body: JSON.stringify({
         conversation_id: activeConvId,
         message: text,
-        model: modelInput.value.trim() || 'huihui_ai/qwen3-abliterated:8b',
+        model: modelInput.value.trim() || 'qwen3-coder:30b',
         think: true,
         use_search: true,
         use_gml_docs: gmlDocsToggle.checked,
         use_ps_docs: psDocsToggle.checked,
         use_file_tools: fileToolsToggle.checked,
+        use_code_interpreter: codeInterpreterToggle.checked,
+        use_mcp_tools: mcpToolsToggle.checked,
       }),
       throwOnError: false,
     });
@@ -1667,7 +1718,6 @@ async function handleSend() {
         } else if (evt.type === 'content') {
           if (!hasContent) {
             spinner.style.display = 'none';
-            if (hasThinking) details.open = false;
             hasContent = true;
           }
           assistantRawContent += evt.delta;
@@ -1757,39 +1807,21 @@ async function handleSend() {
           }
           scrollToBottom();
 
-        } else if (evt.type === 'permission_required') {
-          const card = document.createElement('div');
-          card.className = 'permission-card';
-
-          const msg = document.createElement('div');
-          msg.textContent = `Permission required to run command: ${evt.command || '(empty command)'}`;
-          card.appendChild(msg);
-
-          if (evt.cwd) {
-            const cwd = document.createElement('div');
-            cwd.style.color = 'var(--text-dim)';
-            cwd.textContent = `cwd: ${evt.cwd}`;
-            card.appendChild(cwd);
-          }
-
-          const actions = document.createElement('div');
-          actions.className = 'perm-actions';
-          const allowBtn = document.createElement('button');
-          allowBtn.textContent = 'Allow';
-          const denyBtn = document.createElement('button');
-          denyBtn.textContent = 'Deny';
-          actions.appendChild(allowBtn);
-          actions.appendChild(denyBtn);
-          card.appendChild(actions);
-
-          const status = document.createElement('div');
-          status.style.color = 'var(--text-dim)';
-          card.appendChild(status);
-
-          allowBtn.addEventListener('click', () => submitCommandApproval(evt.cmd_id, true, card, status));
-          denyBtn.addEventListener('click', () => submitCommandApproval(evt.cmd_id, false, card, status));
-
-          permissionEl.appendChild(card);
+        } else if (evt.type === 'tool_mode_warning') {
+          // Model is narrating tool calls as plain text instead of executing them.
+          // Render a non-fatal inline warning banner above the response content.
+          const banner = document.createElement('div');
+          banner.style.cssText = [
+            'margin-bottom:8px',
+            'padding:6px 10px',
+            'border-radius:6px',
+            'font-size:12px',
+            'background:rgba(255,180,0,0.12)',
+            'border:1px solid rgba(255,180,0,0.4)',
+            'color:#e6a817',
+          ].join(';');
+          banner.textContent = '⚠ ' + evt.message;
+          contentBubble.parentNode.insertBefore(banner, contentBubble);
           scrollToBottom();
 
         } else if (evt.type === 'error') {
@@ -1893,6 +1925,63 @@ async function loadAdminUsers() {
   const res = await apiFetch('/api/admin/users');
   const users = await res.json();
   renderAdminUsers(users);
+}
+
+async function loadMcpAdminPanel() {
+  if (!currentUser) return;
+  const mcpConfigEditorEl = document.getElementById('mcp-config-editor');
+  const mcpSaveStatusEl   = document.getElementById('mcp-save-status');
+  const mcpActiveToolsEl  = document.getElementById('mcp-active-tools');
+  if (!mcpConfigEditorEl) return;
+
+  try {
+    const res = await apiFetch('/api/mcp-config');
+    if (!res.ok) return;
+    const data = await res.json();
+    mcpConfigEditorEl.value = JSON.stringify(data.config || {}, null, 2);
+    if (data.tools_count > 0) {
+      mcpActiveToolsEl.textContent =
+        `Active tools (${data.tools_count}): ` +
+        data.tools_active.map(t => t.name).join(', ');
+    } else {
+      mcpActiveToolsEl.textContent = 'No active MCP tools.';
+    }
+  } catch (e) {
+    mcpActiveToolsEl.textContent = `Failed to load MCP config: ${e.message}`;
+  }
+
+  document.getElementById('mcp-save-btn').addEventListener('click', async () => {
+    mcpSaveStatusEl.style.color = 'var(--text-dim)';
+    mcpSaveStatusEl.textContent = 'Saving…';
+    let cfg;
+    try {
+      cfg = JSON.parse(mcpConfigEditorEl.value || '{}');
+    } catch {
+      mcpSaveStatusEl.style.color = 'var(--error)';
+      mcpSaveStatusEl.textContent = 'Invalid JSON — please fix and try again.';
+      return;
+    }
+    try {
+      const r = await apiFetch('/api/mcp-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cfg),
+      });
+      const result = await r.json();
+      if (r.ok) {
+        mcpSaveStatusEl.style.color = 'var(--accent)';
+        mcpSaveStatusEl.textContent =
+          `Saved. ${result.tools_count} tool(s) active: ${(result.tools || []).join(', ') || 'none'}`;
+        mcpActiveToolsEl.textContent = mcpSaveStatusEl.textContent;
+      } else {
+        mcpSaveStatusEl.style.color = 'var(--error)';
+        mcpSaveStatusEl.textContent = `Error: ${result.detail || JSON.stringify(result)}`;
+      }
+    } catch (e) {
+      mcpSaveStatusEl.style.color = 'var(--error)';
+      mcpSaveStatusEl.textContent = `Request failed: ${e.message}`;
+    }
+  }, { once: false });
 }
 
 function renderAdminUsers(users) {

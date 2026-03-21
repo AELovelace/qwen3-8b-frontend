@@ -10,3 +10,5 @@ beautifulsoup4==4.12.3
 markdownify==0.13.1
 chromadb>=0.4.0
 sentence-transformers>=2.2.0
+# Qwen-Agent agentic framework
+qwen-agent[rag,code_interpreter,mcp]>=0.0.26

@@ -1,4 +1,4 @@
-# Ollama Qwen3 Frontend
+# Ollama Qwen3 Coder Frontend
 
 A lightweight local chat application with:
 
@@ -22,7 +22,7 @@ A lightweight local chat application with:
 - Long-term memory retrieval from older conversations when active context is truncated
 - Local GameMaker manual retrieval from `/indexed-docs/gml/**/*.md` for GML-specific coding help
 - Local PowerShell docs retrieval from `/indexed-docs/ps-docs/**/*.md` for PowerShell-specific guidance
-- Auto-start attempt for `ollama serve` when Ollama is not running
+- Auto-start attempt for `ollama serve` when Ollama is configured locally and not running
 - Persistent settings for Brave API key in `config.json`
 
 ## Tech Stack
@@ -56,10 +56,10 @@ pip install -r requirements.txt
 ollama serve
 ```
 
-4. Ensure your model is available in Ollama (example):
+4. Ensure your model is available in Ollama on `MONOLITH-III` (example):
 
 ```bash
-ollama pull huihui_ai/qwen3-abliterated:8b
+ollama pull qwen3-coder:30b
 ```
 
 5. Run the app:
@@ -72,12 +72,94 @@ python server.py
 
 - `http://127.0.0.1:8000`
 
+## Remote Ollama Startup Script
+
+Use the helper script to start Ollama on `MONOLITH-III`, ensure `qwen3-coder:30b` is pulled, and verify local connectivity to `100.66.64.45:11434`:
+
+```powershell
+.\scripts\start-remote-qwen3-server.ps1
+```
+
+With explicit remoting credentials:
+
+```powershell
+$cred = Get-Credential
+.\scripts\start-remote-qwen3-server.ps1 -Credential $cred
+```
+
+If WinRM trust errors occur (`ServerNotTrusted`), add the host/IP to TrustedHosts and retry in one step:
+
+```powershell
+.\scripts\start-remote-qwen3-server.ps1 -AddToTrustedHosts
+```
+
+If TrustedHosts update fails because WinRM is not configured locally, run an elevated PowerShell and use:
+
+```powershell
+.\scripts\start-remote-qwen3-server.ps1 -ConfigureLocalWinRM -AddToTrustedHosts
+```
+
+Optional overrides:
+
+```powershell
+.\scripts\start-remote-qwen3-server.ps1 -RemoteHost MONOLITH-III -RemoteIp 100.66.64.45 -Model qwen3-coder:30b -Port 11434
+```
+
+The script attempts WinRM to `-RemoteHost` first and automatically retries using `-RemoteIp` if the hostname path fails.
+
+### Run Directly On Monolith-III
+
+If you have remote desktop/session access to Monolith-III, run the local helper script on that machine (no WinRM needed):
+
+```powershell
+.\scripts\start-local-qwen3-server.ps1
+```
+
+By default, this script starts Ollama with bind host `0.0.0.0` on port `11434`.
+
+Optional Tailscale reachability check from Monolith-III itself:
+
+```powershell
+.\scripts\start-local-qwen3-server.ps1 -VerifyTailscaleEndpoint -TailscaleIp 100.66.64.45
+```
+
+Note: checking `100.66.64.45` from Monolith-III itself can fail on some setups even when remote clients can connect. The script now warns in that case; confirm from a different machine for final validation.
+
+If clients cannot reach Ollama from other machines, run with network bind + firewall rule:
+
+```powershell
+.\scripts\start-local-qwen3-server.ps1 -RestartOllama -BindHost 0.0.0.0 -EnsureFirewallRule -VerifyTailscaleEndpoint
+```
+
+Keep `qwen3-coder:30b` warm in memory:
+
+```powershell
+.\scripts\start-local-qwen3-server.ps1 -KeepAlive -1
+```
+
+Notes:
+- `-KeepAlive -1` requests indefinite model residency in memory.
+- The script sends a warm-up request after `ollama pull` unless `-SkipWarmup` is used.
+
 ## Configuration
 
 ### Model
 
 - The frontend model input is sent in each chat request as `model`.
-- Backend default model (if omitted) is `huihui_ai/qwen3-abliterated:8b`.
+- Backend default model (if omitted) is `qwen3-coder:30b`.
+
+### Ollama endpoint
+
+- The backend defaults to the Tailscale Ollama host at `http://100.66.64.45:11434`.
+- Override this with the `OLLAMA_BASE_URL` environment variable if the host changes.
+- Local `ollama serve` auto-start is only attempted when `OLLAMA_BASE_URL` points to a local address such as `127.0.0.1` or `localhost`.
+
+### Tool-calling mode
+
+- `QWEN_AGENT_USE_RAW_API` controls whether raw OpenAI-style tool-calling is used (`0` by default).
+- `QWEN_AGENT_FNCALL_PROMPT_TYPE` controls qwen-agent function-call prompting style (`nous` by default).
+- For Ollama builds where the model prints pseudo tool tags instead of executing tools, keep `QWEN_AGENT_USE_RAW_API=0`.
+- If your backend and model support native OpenAI `tool_calls` reliably, set `QWEN_AGENT_USE_RAW_API=1`.
 
 ### Brave API key
 
@@ -141,6 +223,9 @@ All routes above require a bearer token.
 
 - `GET /api/settings` - key status + masked display
 - `POST /api/settings` - save Brave key to `config.json`
+- `GET /api/mcp-config` - get current user's MCP server configuration
+- `POST /api/mcp-config` - save current user's MCP server configuration
+- `GET /api/code-interpreter/status` - return Docker code interpreter availability
 
 ### Chat
 
@@ -152,11 +237,14 @@ Chat request payload:
 {
   "conversation_id": "uuid",
   "message": "user message",
-  "model": "huihui_ai/qwen3-abliterated:8b",
+  "model": "qwen3-coder:30b",
   "think": true,
   "use_search": true,
   "use_gml_docs": true,
-  "use_ps_docs": true
+  "use_ps_docs": true,
+  "use_file_tools": false,
+  "use_code_interpreter": false,
+  "use_mcp_tools": true
 }
 ```
 
@@ -168,8 +256,8 @@ SSE event types include:
 
 - `thinking` - reasoning delta
 - `content` - response delta
-- `search_start` - web search started (or skipped)
-- `search_done` - search completed
+- `tool_call` - tool invocation started
+- `tool_result` - tool invocation completed
 - `done` - stream finished with metadata
 - `error` - runtime or upstream error
 
@@ -179,7 +267,7 @@ The app creates `memory.db` on startup.
 
 Main tables:
 
-- `users(id, username, role, file_tools_enabled, workspace_root, persona_prompt, ...)`
+- `users(id, username, role, file_tools_enabled, workspace_root, persona_prompt, mcp_config, ...)`
 - `conversations(id, title, created_at)`
 - `messages(id, conversation_id, role, content, thinking, token_count, created_at)`
 - `messages_fts` (FTS5 virtual table indexing message content)
@@ -192,11 +280,14 @@ Triggers keep `messages_fts` in sync for inserts/deletes.
 - If auto-start fails, `/api/chat` returns HTTP 503 with guidance.
 - Web search requires a valid Brave API key.
 - FTS retrieval is used only when active token budget is exceeded.
+- `code_interpreter` requires Docker to be running locally.
+- MCP servers are stored per user and validated before launch.
 
 ## Project Files
 
-- `server.py` - backend app, data layer, chat streaming, search loop
+- `server.py` - backend app, data layer, Qwen-Agent chat streaming, MCP + RAG orchestration
 - `index.html` - UI and browser-side app logic
+- `agent_tools.py` - Qwen-Agent BaseTool registrations, MCP helpers, Docker code interpreter wrapper
 - `convert_manual_html_to_md.py` - converts manual HTML pages to Markdown
 - `requirements.txt` - Python dependencies
 - `memory.db` - runtime SQLite data (generated)
