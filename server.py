@@ -18,10 +18,24 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncGenerator
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / ".env")
+
+# Qwen-Agent integration — import after dotenv so any env vars are set
+from agent_tools import (
+    set_request_context,
+    code_interpreter,
+)
+
+try:
+    from qwen_agent.agents import Assistant
+    from qwen_agent.llm import get_chat_model
+    QWEN_AGENT_RUNTIME_AVAILABLE = True
+except ImportError:
+    QWEN_AGENT_RUNTIME_AVAILABLE = False
 
 import aiohttp
 import aiosqlite
@@ -44,18 +58,20 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-OLLAMA_URL        = "http://127.0.0.1:11434/api/chat"
-OLLAMA_HEALTH_URL = "http://127.0.0.1:11434/api/tags"
+OLLAMA_BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://100.66.64.45:11434").rstrip("/")
+OLLAMA_URL        = f"{OLLAMA_BASE_URL}/api/chat"
+OLLAMA_HEALTH_URL = f"{OLLAMA_BASE_URL}/api/tags"
+OLLAMA_OPENAI_URL = f"{OLLAMA_BASE_URL}/v1"
 BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
-DEFAULT_MODEL     = "goekdenizguelmez/JOSIEFIED-Qwen3:8b"
+DEFAULT_MODEL     = "qwen3-coder:30b"
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
 CONFIG_PATH       = Path(__file__).parent / "config.json"
 INDEXED_DOCS_ROOT = Path(__file__).parent / "indexed-docs"
 GML_DOCS_ROOT     = INDEXED_DOCS_ROOT / "gml"
 PS_DOCS_ROOT      = INDEXED_DOCS_ROOT / "ps-docs"
-GML_EMBEDDINGS_DB = Path(__file__).parent / "gml_embeddings"
-PS_EMBEDDINGS_DB  = Path(__file__).parent / "ps_docs_embeddings"
+GML_EMBEDDINGS_DB  = Path(__file__).parent / "gml_embeddings"
+PS_EMBEDDINGS_DB   = Path(__file__).parent / "ps_docs_embeddings"
 TOKEN_CAP              = 20_000  # max tokens kept in active context
 FTS_RESULT_LIMIT       = 3       # past-memory snippets to inject when truncated
 TOKEN_ESTIMATE_DIVISOR = 4       # chars / 4 ≈ tokens
@@ -69,6 +85,26 @@ ACCESS_TOKEN_HOURS     = 24
 
 SEARCH_TAG_RE = re.compile(r'<search>(.*?)</search>', re.IGNORECASE | re.DOTALL)
 GML_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
+THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
+# Matches pseudo tool-call syntax the model emits when it narrates tool use in
+# plain text instead of making a real structured tool call, e.g.:
+#   <function=list_dir>   <tool_call>   <|tool_call|>   [TOOL:read_file]
+# Detecting these lets the backend warn the frontend about tool-mode mismatch.
+PSEUDO_TOOL_TAG_RE = re.compile(
+    r'(?:'
+    r'<function\s*=\s*\w+>'
+    r'|<tool_call>'
+    r'|<\|tool_call\|>'
+    r'|\[TOOL\s*:\s*\w+\]'
+    r'|<tool_use>'
+    r')',
+    re.IGNORECASE,
+)
+
+_ollama_endpoint = urlparse(OLLAMA_BASE_URL)
+OLLAMA_HOST = (_ollama_endpoint.hostname or "").lower()
+OLLAMA_PORT = _ollama_endpoint.port or (443 if _ollama_endpoint.scheme == "https" else 80)
+OLLAMA_IS_LOCAL = OLLAMA_HOST in {"127.0.0.1", "localhost", "::1"}
 
 SEARCH_SYSTEM_PROMPT = (
     "You have access to a live web search tool. "
@@ -83,24 +119,43 @@ GML_SYSTEM_PROMPT = (
     "You are assisting with GameMaker programming in GML. "
     "Prefer accurate GameMaker terminology, explain engine-specific behavior clearly, "
     "and provide practical code examples when useful. "
-    "If local GameMaker manual excerpts are provided, use them as your primary source. "
-    "If the excerpts do not fully answer the question, say what is missing instead of inventing APIs or behavior."
+    "Use the gml_docs_search tool whenever authoritative manual details are needed. "
+    "If retrieved excerpts do not fully answer the question, say what is missing instead of inventing APIs or behavior."
 )
 
 PS_SYSTEM_PROMPT = (
     "You are assisting with PowerShell scripting and automation. "
     "Prefer accurate PowerShell terminology and explain shell-specific behavior clearly. "
-    "If local PowerShell docs excerpts are provided, use them as your primary source. "
-    "If the excerpts do not fully answer the question, say what is missing instead of inventing commands, parameters, or behavior."
+    "Use the ps_docs_search tool whenever authoritative documentation details are needed. "
+    "If retrieved excerpts do not fully answer the question, say what is missing instead of inventing commands, parameters, or behavior."
+)
+
+ENGLISH_ONLY_SYSTEM_PROMPT = (
+    "You must respond only in English. "
+    "Do not use other languages, including mixed-language output, unless explicitly asked to translate quoted text."
 )
 
 FILE_TOOLS_SYSTEM_PROMPT = (
     "You have access to local file operations tools for reading, writing, and searching files. "
     "The workspace is sandboxed to a specific root directory configured by your admin. "
     "You can use these tools to analyze code, make edits, and validate your work. "
-    "Command execution (execute_command tool) is always gated: you will receive a permission prompt before any command runs. "
-    "Provide complete, correct tool calls; the user will handle permission dialogs. "
-    "If you show a tool call in assistant-visible text, always surround it with a markdown fenced code block."
+    "For code execution, use the code_interpreter tool, which runs inside a Docker sandbox mounted to the workspace only. "
+    "Do not ask for shell command execution; it is not available. "
+    "If you show a tool call in assistant-visible text, always surround it with a markdown fenced code block. "
+    "When the user asks to list files or directories, call list_dir and return the exact directory entries from the tool output, "
+    "one per line, without summarizing, grouping, or omitting entries unless the tool itself reports truncation."
+)
+
+TOOL_EXECUTION_CONTRACT_PROMPT = (
+    "Execution-first contract for tool and MCP calls: "
+    "If the user request is concrete and executable, do the work first and do not ask clarifying questions. "
+    "Never replace requested output with a high-level summary unless explicitly asked. "
+    "Never stop early due to response length; if output is large, split into batches and continue until complete. "
+    "Ask follow-up questions only for true blockers such as missing path, permission denied, unavailable command, or contradictory constraints. "
+    "For file inventory requests, include every discovered file and provide one concise line per file; include binary/unreadable files with that label. "
+    "Before finishing, verify scope coverage and that output count matches discovered items. "
+    "If a tool call fails, retry with an equivalent method; if still blocked, report what was tried and return partial results clearly labeled PARTIAL. "
+    "Only mark completion when all requested items are delivered."
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -151,10 +206,6 @@ _ps_index_lock = asyncio.Lock()
 _auth_scheme = HTTPBearer(auto_error=False)
 _pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
-# Command approval state: {cmd_id: (event, user_id, result, command)}
-_pending_approvals: dict[str, tuple[asyncio.Event, str, bool, str]] = {}
-_pending_approvals_lock = asyncio.Lock()
-
 # Embeddings model (lazy-loaded)
 _embedding_model: SentenceTransformerEmbeddingFunction | None = None
 _gml_chroma_client = None  # chromadb.PersistentClient, typed loosely to avoid import quirks
@@ -176,6 +227,7 @@ _DDL_STATEMENTS = [
         file_tools_enabled  INTEGER NOT NULL DEFAULT 0,
         workspace_root      TEXT NOT NULL DEFAULT '',
         persona_prompt      TEXT NOT NULL DEFAULT '',
+        mcp_config          TEXT NOT NULL DEFAULT '',
         created_at          TEXT NOT NULL
     )
     """,
@@ -320,6 +372,8 @@ async def ensure_user_tools_columns(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE users ADD COLUMN workspace_root TEXT NOT NULL DEFAULT ''")
     if "persona_prompt" not in cols:
         await db.execute("ALTER TABLE users ADD COLUMN persona_prompt TEXT NOT NULL DEFAULT ''")
+    if "mcp_config" not in cols:
+        await db.execute("ALTER TABLE users ADD COLUMN mcp_config TEXT NOT NULL DEFAULT ''")
     await db.commit()
 
 
@@ -432,7 +486,7 @@ async def get_current_user(
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users WHERE id=?",
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, mcp_config, created_at FROM users WHERE id=?",
             (user_id,),
         )
         row = await cursor.fetchone()
@@ -450,7 +504,7 @@ async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
 
 
 async def is_ollama_running(timeout_seconds: float = 1.5) -> bool:
-    """Return True when Ollama responds on port 11434."""
+    """Return True when the configured Ollama endpoint responds."""
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -462,6 +516,10 @@ async def is_ollama_running(timeout_seconds: float = 1.5) -> bool:
 
 def start_ollama_service() -> bool:
     """Try to launch `ollama serve` in a detached process."""
+    if not OLLAMA_IS_LOCAL:
+        log.info("Skipping local Ollama auto-start because endpoint is remote: %s", OLLAMA_BASE_URL)
+        return False
+
     ollama_bin = shutil.which("ollama")
     if not ollama_bin:
         log.warning("Ollama binary not found in PATH; cannot auto-start service.")
@@ -489,25 +547,29 @@ def start_ollama_service() -> bool:
 
 
 async def ensure_ollama_running(wait_seconds: int = 8) -> bool:
-    """Ensure Ollama is reachable; auto-start it when missing."""
+    """Ensure Ollama is reachable; auto-start it only for local endpoints."""
     if await is_ollama_running():
         return True
+
+    if not OLLAMA_IS_LOCAL:
+        log.warning("Configured remote Ollama endpoint is unavailable: %s", OLLAMA_BASE_URL)
+        return False
 
     async with _ollama_start_lock:
         if await is_ollama_running():
             return True
 
-        log.warning("No service detected on port 11434. Attempting to start Ollama.")
+        log.warning("No local Ollama service detected at %s. Attempting to start Ollama.", OLLAMA_BASE_URL)
         if not start_ollama_service():
             return False
 
         for _ in range(wait_seconds):
             await asyncio.sleep(1)
             if await is_ollama_running():
-                log.info("Ollama became available on port 11434.")
+                log.info("Ollama became available at %s.", OLLAMA_BASE_URL)
                 return True
 
-        log.warning("Ollama did not become ready after %s seconds.", wait_seconds)
+        log.warning("Ollama did not become ready at %s after %s seconds.", OLLAMA_BASE_URL, wait_seconds)
         return False
 
 
@@ -535,6 +597,8 @@ class ChatRequest(BaseModel):
     use_gml_docs: bool = True
     use_ps_docs: bool = False
     use_file_tools: bool = False
+    use_code_interpreter: bool = False  # Docker-based sandboxed Python execution
+    use_mcp_tools: bool = True  # Include initialised MCP server tools
 
 
 class SettingsUpdate(BaseModel):
@@ -566,11 +630,6 @@ class AdminPersonaUpdateRequest(BaseModel):
     persona_prompt: str = ""
 
 
-class CommandApprovalRequest(BaseModel):
-    cmd_id: str
-    approved: bool
-
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -588,7 +647,12 @@ def normalize_model_name(model: str) -> str:
     cleaned = (model or "").strip()
     if not cleaned:
         return DEFAULT_MODEL
-    if cleaned == "huihui_ai/qwen3-abliterated":
+    if cleaned in {
+        "huihui_ai/qwen3-abliterated",
+        "huihui_ai/qwen3-abliterated:8b",
+        "goekdenizguelmez/JOSIEFIED-Qwen3:8b",
+        "goekdenizguelmez/JOSIEFIED-Qwen3:8b-q8_0",
+    }:
         return DEFAULT_MODEL
     return cleaned
 
@@ -1038,6 +1102,70 @@ def search_ps_docs(query: str, limit: int = PS_RESULT_LIMIT) -> list[dict]:
     )
 
 
+def _keyword_search_docs(query: str, index: dict, limit: int) -> list[dict]:
+    """Keyword fallback retrieval over pre-chunked docs when vector search is unavailable."""
+    chunks = index.get("chunks", []) if isinstance(index, dict) else []
+    if not chunks:
+        return []
+
+    query_tokens = Counter(tokenize_search_text(query))
+    if not query_tokens:
+        return []
+
+    scored: list[tuple[float, dict]] = []
+    for chunk in chunks:
+        chunk_tokens: Counter = chunk.get("tokens", Counter())
+        score = 0.0
+        for token, qtf in query_tokens.items():
+            ctf = float(chunk_tokens.get(token, 0))
+            if ctf:
+                score += ctf * float(qtf)
+        if score > 0:
+            scored.append((score, chunk))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = []
+    for score, chunk in scored[:limit]:
+        selected.append(
+            {
+                "score": score,
+                "path": chunk.get("path", ""),
+                "heading": chunk.get("heading", ""),
+                "content": chunk.get("content", ""),
+            }
+        )
+    return selected
+
+
+def rag_search_gml_docs(query: str, limit: int = GML_RESULT_LIMIT) -> list[dict]:
+    """Hybrid retrieval for GML docs: Chroma semantic first, keyword fallback."""
+    gml_index = getattr(app.state, "gml_index", None)
+    if gml_index is None:
+        gml_index = build_gml_index(GML_DOCS_ROOT, source_label="GML")
+        app.state.gml_index = gml_index
+
+    snippets = search_gml_docs(query, limit=limit)
+    if snippets:
+        return snippets
+    return _keyword_search_docs(query, gml_index, limit)
+
+
+def rag_search_ps_docs(query: str, limit: int = PS_RESULT_LIMIT) -> list[dict]:
+    """Hybrid retrieval for PowerShell docs: Chroma semantic first, keyword fallback."""
+    ps_index = getattr(app.state, "ps_index", None)
+    if ps_index is None:
+        ps_index = build_gml_index(PS_DOCS_ROOT, source_label="PowerShell")
+        app.state.ps_index = ps_index
+
+    snippets = search_ps_docs(query, limit=limit)
+    if snippets:
+        return snippets
+    return _keyword_search_docs(query, ps_index, limit)
+
+
 def format_gml_snippets(snippets: list[dict]) -> str:
     lines = [
         "The following excerpts were retrieved from the local GameMaker markdown manual under /indexed-docs/gml.",
@@ -1082,6 +1210,122 @@ def save_config(data: dict) -> None:
 def get_brave_api_key() -> str:
     """Return Brave API key from env var or config.json (env takes priority)."""
     return os.environ.get("BRAVE_API_KEY") or load_config().get("brave_api_key", "")
+
+
+def _default_user_mcp_config(workspace_root: str) -> dict:
+    cfg = {
+        "mcpServers": {
+            "memory": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-memory"],
+            },
+        }
+    }
+    if shutil.which("uvx"):
+        cfg["mcpServers"]["sqlite"] = {
+            "command": "uvx",
+            "args": ["mcp-server-sqlite", "--db-path", "memory.db"],
+        }
+    if workspace_root:
+        cfg["mcpServers"]["filesystem"] = {
+            "command": "npx",
+            "args": ["-y", "@modelcontextprotocol/server-filesystem", "<workspace_root>"],
+        }
+    return cfg
+
+
+def _load_user_mcp_config(raw_json: str, workspace_root: str) -> dict:
+    if not (raw_json or "").strip():
+        return _default_user_mcp_config(workspace_root)
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid stored MCP config JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="MCP config must be a JSON object")
+    servers = data.get("mcpServers", {})
+    if servers is None:
+        servers = {}
+    if not isinstance(servers, dict):
+        raise HTTPException(status_code=400, detail="mcpServers must be an object")
+    return {"mcpServers": servers}
+
+
+def _resolve_and_validate_user_mcp_config(config: dict, workspace_root: str) -> dict:
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=400, detail="MCP config must be a JSON object")
+    servers = config.get("mcpServers", {})
+    if servers is None:
+        servers = {}
+    if not isinstance(servers, dict):
+        raise HTTPException(status_code=400, detail="mcpServers must be an object")
+
+    allowed_commands = {"npx", "uvx"}
+    blocked_commands = {"cmd", "powershell", "pwsh", "bash", "sh", "zsh"}
+
+    resolved = {"mcpServers": {}}
+    for server_name, server_cfg in servers.items():
+        if not isinstance(server_name, str) or not server_name.strip():
+            raise HTTPException(status_code=400, detail="mcpServers keys must be non-empty strings")
+        if not isinstance(server_cfg, dict):
+            raise HTTPException(status_code=400, detail=f"mcpServers.{server_name} must be an object")
+
+        command = str(server_cfg.get("command", "")).strip()
+        args = server_cfg.get("args", [])
+        if not command:
+            raise HTTPException(status_code=400, detail=f"mcpServers.{server_name}.command is required")
+        if not isinstance(args, list) or any(not isinstance(x, str) for x in args):
+            raise HTTPException(status_code=400, detail=f"mcpServers.{server_name}.args must be a string array")
+
+        cmd_name = Path(command).name.lower()
+        if cmd_name in blocked_commands:
+            raise HTTPException(status_code=400, detail=f"Command '{command}' is not allowed for MCP servers")
+        if cmd_name not in allowed_commands:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Command '{command}' is not allowed. Allowed commands: {sorted(allowed_commands)}",
+            )
+        if shutil.which(command) is None and shutil.which(cmd_name) is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"MCP server '{server_name}' command '{command}' is not on PATH. "
+                    "Install the command or update mcp-config."
+                ),
+            )
+
+        resolved_args: list[str] = []
+        for arg in args:
+            v = arg.replace("<workspace_root>", workspace_root or "")
+            v = v.replace("<db_path>", str(DB_PATH.resolve()))
+            if "<workspace_root>" in arg and not workspace_root:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"mcpServers.{server_name} references <workspace_root>, "
+                        "but this user has no workspace_root configured"
+                    ),
+                )
+            resolved_args.append(v)
+
+        if "@modelcontextprotocol/server-filesystem" in resolved_args:
+            if not workspace_root:
+                raise HTTPException(
+                    status_code=400,
+                    detail="filesystem MCP server requires workspace_root to be configured by admin",
+                )
+            # Enforce exactly one allowed root for filesystem server sandboxing.
+            resolved_args = ["-y", "@modelcontextprotocol/server-filesystem", str(Path(workspace_root).resolve())]
+
+        if "mcp-server-sqlite" in resolved_args:
+            # Restrict SQLite MCP access to the local application memory DB.
+            resolved_args = ["mcp-server-sqlite", "--db-path", str(DB_PATH.resolve())]
+
+        resolved["mcpServers"][server_name] = {
+            "command": command,
+            "args": resolved_args,
+        }
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -1474,7 +1718,7 @@ async def login(body: LoginRequest):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, password_hash, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users WHERE username=?",
+            "SELECT id, username, password_hash, role, is_active, file_tools_enabled, workspace_root, persona_prompt, mcp_config, created_at FROM users WHERE username=?",
             (username,),
         )
         user = await cursor.fetchone()
@@ -1494,6 +1738,7 @@ async def login(body: LoginRequest):
                 "file_tools_enabled": bool(user["file_tools_enabled"]),
                 "workspace_root": user["workspace_root"],
                 "persona_prompt": user["persona_prompt"],
+                "mcp_config": user["mcp_config"],
                 "created_at": user["created_at"],
             },
         }
@@ -1559,6 +1804,7 @@ async def signup(body: SignupRequest):
                 "file_tools_enabled": False,
                 "workspace_root": "",
                 "persona_prompt": "",
+                "mcp_config": "",
                 "created_at": now,
             },
         }
@@ -1575,6 +1821,7 @@ async def auth_me(current_user: dict = Depends(get_current_user)):
         "file_tools_enabled": bool(current_user["file_tools_enabled"]),
         "workspace_root": current_user["workspace_root"],
         "persona_prompt": current_user.get("persona_prompt", ""),
+        "mcp_config": current_user.get("mcp_config", ""),
         "created_at": current_user["created_at"],
     }
 
@@ -1584,7 +1831,7 @@ async def admin_list_users(_: dict = Depends(require_admin)):
     db = await get_db()
     try:
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users ORDER BY created_at ASC"
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, mcp_config, created_at FROM users ORDER BY created_at ASC"
         )
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
@@ -1624,6 +1871,7 @@ async def admin_create_user(body: AdminCreateUserRequest, _: dict = Depends(requ
             "file_tools_enabled": False,
             "workspace_root": "",
             "persona_prompt": "",
+            "mcp_config": "",
             "created_at": ts,
         }
     finally:
@@ -1705,7 +1953,7 @@ async def admin_update_user(
 
         # Return updated user
         cursor = await db.execute(
-            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, created_at FROM users WHERE id=?",
+            "SELECT id, username, role, is_active, file_tools_enabled, workspace_root, persona_prompt, mcp_config, created_at FROM users WHERE id=?",
             (user_id,),
         )
         user = await cursor.fetchone()
@@ -1858,425 +2106,82 @@ async def get_settings(_: dict = Depends(get_current_user)):
     }
 
 
+@app.get("/api/mcp-config")
+async def get_mcp_config(current_user: dict = Depends(get_current_user)):
+    """Return the current user's MCP server configuration and runtime-resolved status."""
+    stored_cfg = _load_user_mcp_config(
+        current_user.get("mcp_config", ""),
+        current_user.get("workspace_root", ""),
+    )
+    resolved_cfg = _resolve_and_validate_user_mcp_config(
+        stored_cfg,
+        current_user.get("workspace_root", ""),
+    )
+    server_names = sorted(resolved_cfg.get("mcpServers", {}).keys())
+    tools_active = [
+        {"name": f"mcp:{name}", "description": "Configured MCP server"}
+        for name in server_names
+    ]
+    return {
+        "config": stored_cfg,
+        "resolved_config": resolved_cfg,
+        "tools_active": tools_active,
+        "tools_count": len(server_names),
+    }
+
+
+@app.post("/api/mcp-config")
+async def update_mcp_config(body: dict, current_user: dict = Depends(get_current_user)):
+    """
+    Replace the current user's MCP server configuration.
+
+    Body must be a JSON object matching the mcpServers format, e.g.:
+    {
+      "mcpServers": {
+        "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+        "filesystem": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path"]}
+      }
+    }
+    Pass an empty object {} or {"mcpServers": {}} to clear all MCP servers.
+    Use <workspace_root> token for filesystem roots when needed.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    # Validate + resolve against the authenticated user's sandbox before saving.
+    _ = _resolve_and_validate_user_mcp_config(body, current_user.get("workspace_root", ""))
+
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE users SET mcp_config=? WHERE id=?",
+            (json.dumps(body, ensure_ascii=True), current_user["id"]),
+        )
+        await db.commit()
+    finally:
+        await db.close()
+
+    saved_server_names = sorted((body.get("mcpServers") or {}).keys())
+    return {
+        "ok": True,
+        "tools_count": len(saved_server_names),
+        "tools": saved_server_names,
+    }
+
+
+@app.get("/api/code-interpreter/status")
+async def code_interpreter_status(_: dict = Depends(get_current_user)):
+    """Return whether the Docker-based code interpreter is available."""
+    available = await asyncio.to_thread(code_interpreter.is_available)
+    return {"available": available}
+
+
 @app.post("/api/settings")
 async def update_settings(body: SettingsUpdate, _: dict = Depends(get_current_user)):
     cfg = load_config()
     cfg["brave_api_key"] = body.brave_api_key.strip()
     save_config(cfg)
     return {"ok": True}
-
-
-@app.post("/api/chat/command-approval")
-async def command_approval(
-    body: CommandApprovalRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """
-    Handle user approval/denial of command execution.
-    
-    The frontend calls this when the user clicks [Approve] or [Deny] on a permission prompt.
-    We look up the pending approval by cmd_id, verify it belongs to this user's session,
-    then set the event + result so the streaming loop can continue.
-    """
-    cmd_id = body.cmd_id
-    async with _pending_approvals_lock:
-        if cmd_id not in _pending_approvals:
-            raise HTTPException(
-                status_code=404,
-                detail="Command approval request not found or already processed",
-            )
-        event, user_id, _, command = _pending_approvals[cmd_id]
-        
-        # Security: ensure this approval belongs to the requesting user
-        if user_id != current_user["id"]:
-            raise HTTPException(
-                status_code=403,
-                detail="Cannot approve another user's command",
-            )
-        
-        # Update the result and signal the waiting stream
-        _pending_approvals[cmd_id] = (event, user_id, body.approved, command)
-        event.set()
-    
-    return {"ok": True, "approved": body.approved}
-
-
-# ---------------------------------------------------------------------------
-# Tool Schemas — Ollama native function calling
-# ---------------------------------------------------------------------------
-
-def get_web_search_tool() -> dict:
-    """Web search tool schema."""
-    return {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web using Brave Search API for current information and facts.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query (e.g., 'latest AI news' or 'Python asyncio best practices')",
-                    }
-                },
-                "required": ["query"],
-            },
-        },
-    }
-
-
-def get_file_tools_schemas() -> list[dict]:
-    """Return all file operation tool schemas."""
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": "read_file",
-                "description": "Read a file with optional line range limits. Automatically truncates if file is too large.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Relative path to the file (relative to workspace root)",
-                        },
-                        "start_line": {
-                            "type": "integer",
-                            "description": "Starting line number (1-indexed, default 1)",
-                        },
-                        "end_line": {
-                            "type": "integer",
-                            "description": "Ending line number (1-indexed, default to end of file)",
-                        },
-                    },
-                    "required": ["path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_file",
-                "description": "Write or overwrite a file. Creates parent directories if needed.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Relative path to the file (relative to workspace root)",
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "The complete file content to write",
-                        },
-                    },
-                    "required": ["path", "content"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "replace_in_file",
-                "description": "Replace exactly one occurrence of a string in a file. Errors if match count != 1.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Relative path to the file",
-                        },
-                        "old_str": {
-                            "type": "string",
-                            "description": "The exact string to find and replace",
-                        },
-                        "new_str": {
-                            "type": "string",
-                            "description": "The replacement string",
-                        },
-                    },
-                    "required": ["path", "old_str", "new_str"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "list_dir",
-                "description": "List directory contents. Directories are suffixed with '/'.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Relative path to the directory (default: workspace root)",
-                        },
-                    },
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "search_files",
-                "description": "Search for files matching a glob pattern under a directory.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pattern": {
-                            "type": "string",
-                            "description": "Glob pattern (e.g., '*.py' or '**/test_*.py')",
-                        },
-                        "directory": {
-                            "type": "string",
-                            "description": "Search directory (default: current workspace root)",
-                        },
-                    },
-                    "required": ["pattern"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "grep_search",
-                "description": "Search for a text query in file(s). Can search a single file or recursively in a directory.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Text or regex pattern to search for",
-                        },
-                        "path": {
-                            "type": "string",
-                            "description": "File or directory path to search in",
-                        },
-                        "is_regex": {
-                            "type": "boolean",
-                            "description": "If true, treat query as regex pattern (default: false)",
-                        },
-                    },
-                    "required": ["query", "path"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "create_directory",
-                "description": "Create a directory (including parent directories).",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Relative path to the directory to create",
-                        },
-                    },
-                    "required": ["path"],
-                },
-            },
-        },
-    ]
-
-
-def get_execute_command_tool() -> dict:
-    """Execute shell command tool schema. Always requires user approval."""
-    return {
-        "type": "function",
-        "function": {
-            "name": "execute_command",
-            "description": (
-                "Execute a shell command. This always requires user approval before execution. "
-                "The user will see a confirmation prompt in the chat UI."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute (e.g., 'python -m py_compile server.py')",
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": "Working directory for the command (default: workspace root)",
-                    },
-                },
-                "required": ["command"],
-            },
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tool Execution Helpers
-# ---------------------------------------------------------------------------
-
-async def execute_tool(
-    tool_name: str,
-    tool_args: dict,
-    current_user: dict,
-    session_user_id: str,  # for command approval tracking
-    cmd_id: str | None = None,
-) -> tuple[bool, str]:
-    """
-    Execute a tool and return (success, result_text).
-    For execute_command, this will wait for user approval before running.
-    """
-    workspace_root = current_user.get("workspace_root", "")
-    if not workspace_root:
-        return False, "[Error: workspace root not configured]"
-    
-    try:
-        if tool_name == "web_search":
-            query = tool_args.get("query", "")
-            if not query:
-                return False, "[Error: query is required]"
-            api_key = get_brave_api_key()
-            if not api_key:
-                return False, "[Error: No Brave API key configured]"
-            results = await brave_search(query, api_key)
-            return True, format_search_results(query, results)
-        
-        elif tool_name == "read_file":
-            path = tool_args.get("path", "")
-            start_line = tool_args.get("start_line", 1)
-            end_line = tool_args.get("end_line")
-            result = await asyncio.to_thread(
-                ft_read_file, workspace_root, path, start_line, end_line
-            )
-            return True, result
-        
-        elif tool_name == "write_file":
-            path = tool_args.get("path", "")
-            content = tool_args.get("content", "")
-            result = await asyncio.to_thread(ft_write_file, workspace_root, path, content)
-            return True, result
-        
-        elif tool_name == "replace_in_file":
-            path = tool_args.get("path", "")
-            old_str = tool_args.get("old_str", "")
-            new_str = tool_args.get("new_str", "")
-            result = await asyncio.to_thread(
-                ft_replace_in_file, workspace_root, path, old_str, new_str
-            )
-            return True, result
-        
-        elif tool_name == "list_dir":
-            path = tool_args.get("path", "")
-            result = await asyncio.to_thread(ft_list_dir, workspace_root, path)
-            return True, result
-        
-        elif tool_name == "search_files":
-            pattern = tool_args.get("pattern", "")
-            directory = tool_args.get("directory", ".")
-            result = await asyncio.to_thread(
-                ft_search_files, workspace_root, pattern, directory
-            )
-            return True, result
-        
-        elif tool_name == "grep_search":
-            query = tool_args.get("query", "")
-            path = tool_args.get("path", "")
-            is_regex = tool_args.get("is_regex", False)
-            result = await asyncio.to_thread(
-                ft_grep_search, workspace_root, query, path, is_regex
-            )
-            return True, result
-        
-        elif tool_name == "create_directory":
-            path = tool_args.get("path", "")
-            result = await asyncio.to_thread(ft_create_directory, workspace_root, path)
-            return True, result
-        
-        elif tool_name == "execute_command":
-            command = tool_args.get("command", "")
-            cwd = tool_args.get("cwd")
-            if not command:
-                return False, "[Error: command is required]"
-            return await _wait_for_command_approval_and_execute(
-                command, cwd or workspace_root, session_user_id, cmd_id
-            )
-        
-        else:
-            return False, f"[Error: unknown tool '{tool_name}']"
-    
-    except FileToolError as exc:
-        return False, f"[Error: {str(exc)}]"
-    except PermissionError as exc:
-        return False, f"[Permission denied: {str(exc)}]"
-    except Exception as exc:
-        log.exception("Tool execution error for %s", tool_name)
-        return False, f"[Error: {str(exc)}]"
-
-
-async def _wait_for_command_approval_and_execute(
-    command: str, cwd: str, user_id: str, cmd_id: str | None
-) -> tuple[bool, str]:
-    """
-    Create a pending approval entry, wait for user approval, then execute or deny.
-    Returns (success, output).
-    """
-    if not cmd_id:
-        cmd_id = str(uuid.uuid4())
-    event = asyncio.Event()
-    
-    async with _pending_approvals_lock:
-        _pending_approvals[cmd_id] = (event, user_id, False, command)
-    
-    try:
-        # Wait up to 120 seconds for approval (emit permission_required event happens in event_stream)
-        await asyncio.wait_for(event.wait(), timeout=120.0)
-    except asyncio.TimeoutError:
-        async with _pending_approvals_lock:
-            if cmd_id in _pending_approvals:
-                del _pending_approvals[cmd_id]
-        return False, "[Command timed out waiting for user approval (120 seconds)]"
-    
-    # Get the approval result
-    async with _pending_approvals_lock:
-        if cmd_id not in _pending_approvals:
-            return False, "[Command approval state lost]"
-        _, _, approved, _ = _pending_approvals[cmd_id]
-        del _pending_approvals[cmd_id]
-    
-    if not approved:
-        return False, "[User denied command execution]"
-    
-    # Execute the command
-    try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            limit=10_000,
-        )
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=30.0
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            _ = await proc.wait()
-            return False, "[Command execution timed out (30 seconds)]"
-        
-        exit_code = proc.returncode
-        output = stdout.decode("utf-8", errors="replace")
-        error = stderr.decode("utf-8", errors="replace")
-        
-        result = f"Exit code: {exit_code}\n"
-        if output:
-            result += f"\nStdout:\n{output[:5000]}"
-        if error:
-            result += f"\nStderr:\n{error[:5000]}"
-        return exit_code == 0, result
-    
-    except Exception as exc:
-        log.exception("Command execution failed: %s", command)
-        return False, f"[Command execution error: {str(exc)}]"
 
 
 # ---------------------------------------------------------------------------
@@ -2286,13 +2191,26 @@ async def _wait_for_command_approval_and_execute(
 @app.post("/api/chat")
 async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
     if not await ensure_ollama_running(wait_seconds=6):
+        detail = (
+            f"Ollama is not available at {OLLAMA_BASE_URL}."
+            if not OLLAMA_IS_LOCAL
+            else f"Ollama is not available at {OLLAMA_BASE_URL} and auto-start failed. Start it with `ollama serve`."
+        )
         raise HTTPException(
             status_code=503,
-            detail="Ollama is not available on port 11434 and auto-start failed. Start it with `ollama serve`.",
+            detail=detail,
         )
 
     # Validate file tools permission
     use_file_tools = req.use_file_tools and bool(current_user.get("file_tools_enabled"))
+    use_any_tooling = any([
+        req.use_search,
+        req.use_gml_docs,
+        req.use_ps_docs,
+        use_file_tools,
+        req.use_code_interpreter,
+        req.use_mcp_tools,
+    ])
 
     db = await get_db()
     try:
@@ -2311,58 +2229,45 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             if fts_snippets:
                 log.info("Injecting %d FTS snippet(s) for conv %s", len(fts_snippets), req.conversation_id)
 
-        gml_snippets: list[dict] = []
-        if req.use_gml_docs:
-            await ensure_gml_index_loaded()
-            gml_snippets = search_gml_docs(req.message)
-            if gml_snippets:
-                log.info("Injecting %d GML snippet(s) for conv %s", len(gml_snippets), req.conversation_id)
-
-        ps_snippets: list[dict] = []
-        if req.use_ps_docs:
-            await ensure_ps_index_loaded()
-            ps_snippets = search_ps_docs(req.message)
-            if ps_snippets:
-                log.info("Injecting %d PowerShell snippet(s) for conv %s", len(ps_snippets), req.conversation_id)
-
         # Build base message list
         ollama_messages: list[dict] = []
+        system_prompt_parts: list[str] = []
+
+        # Global output policy
+        system_prompt_parts.append(ENGLISH_ONLY_SYSTEM_PROMPT)
 
         # Admin persona prompt (hot-loaded from DB per request)
         admin_persona_prompt = (current_user.get("persona_prompt") or "").strip()
         if current_user.get("role") == "admin" and admin_persona_prompt:
-            ollama_messages.append({"role": "system", "content": admin_persona_prompt})
+            system_prompt_parts.append(admin_persona_prompt)
 
         # System prompts based on requested features
         if req.use_gml_docs:
-            ollama_messages.append({"role": "system", "content": GML_SYSTEM_PROMPT})
-            if gml_snippets:
-                ollama_messages.append({
-                    "role": "system",
-                    "content": format_gml_snippets(gml_snippets),
-                })
+            system_prompt_parts.append(GML_SYSTEM_PROMPT)
 
         if req.use_ps_docs:
-            ollama_messages.append({"role": "system", "content": PS_SYSTEM_PROMPT})
-            if ps_snippets:
-                ollama_messages.append({
-                    "role": "system",
-                    "content": format_ps_snippets(ps_snippets),
-                })
+            system_prompt_parts.append(PS_SYSTEM_PROMPT)
 
         if use_file_tools:
-            ollama_messages.append({"role": "system", "content": FILE_TOOLS_SYSTEM_PROMPT})
+            system_prompt_parts.append(FILE_TOOLS_SYSTEM_PROMPT)
+
+        # Enforce stronger compliance when any tool/MCP path is enabled.
+        if use_any_tooling:
+            system_prompt_parts.append(TOOL_EXECUTION_CONTRACT_PROMPT)
 
         # Long-term memory injection
         if fts_snippets:
             snippets_text = "\n\n---\n\n".join(fts_snippets)
+            system_prompt_parts.append(
+                "The following are relevant excerpts from your long-term memory "
+                "(earlier conversations outside the active context window). "
+                "Use them if relevant:\n\n" + snippets_text
+            )
+
+        if system_prompt_parts:
             ollama_messages.append({
                 "role": "system",
-                "content": (
-                    "The following are relevant excerpts from your long-term memory "
-                    "(earlier conversations outside the active context window). "
-                    "Use them if relevant:\n\n" + snippets_text
-                ),
+                "content": "\n\n".join(part for part in system_prompt_parts if part),
             })
 
         # Conversation history + new user message
@@ -2379,151 +2284,243 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
     requested_model = normalize_model_name(req.model)
 
     async def event_stream() -> AsyncGenerator[str, None]:
+        # Wire per-request context for BaseTool.call() implementations
+        set_request_context(
+            workspace_root=current_user.get("workspace_root", ""),
+            brave_api_key=get_brave_api_key(),
+        )
+
         all_thinking = ""
         final_content = ""
         tools_called = 0
-        commands_run = 0
+        code_runs = 0
         file_reads = 0
         file_writes = 0
+        gml_snippet_count = 0
+        ps_snippet_count = 0
         working_msgs = list(ollama_messages)
-        
-        def _build_tools_list() -> list[dict]:
-            """Build tool list based on enabled features."""
-            tools = []
+
+        # Some backends require at most one system message and require it first.
+        # Collapse any stray system messages from history/tool traces into one.
+        collapsed_system_parts: list[str] = []
+        non_system_msgs: list[dict] = []
+        for msg in working_msgs:
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                content = str(msg.get("content") or "").strip()
+                if content:
+                    collapsed_system_parts.append(content)
+            else:
+                non_system_msgs.append(msg)
+        if collapsed_system_parts:
+            working_msgs = [{
+                "role": "system",
+                "content": "\n\n".join(collapsed_system_parts),
+            }] + non_system_msgs
+        else:
+            working_msgs = non_system_msgs
+
+        def _build_agent_function_list(include_mcp_tools: bool = True) -> list:
+            """Build Qwen-Agent function_list based on enabled features."""
+            tools: list = []
             if req.use_search:
-                tools.append(get_web_search_tool())
+                tools.append("web_search")
             if use_file_tools:
-                tools.extend(get_file_tools_schemas())
-                tools.append(get_execute_command_tool())
+                tools.extend([
+                    "read_file",
+                    "write_file",
+                    "replace_in_file",
+                    "list_dir",
+                    "search_files",
+                    "grep_search",
+                    "create_directory",
+                ])
+            if req.use_gml_docs:
+                tools.append("gml_docs_search")
+            if req.use_ps_docs:
+                tools.append("ps_docs_search")
+            if req.use_code_interpreter and code_interpreter.is_available():
+                tools.append("code_interpreter")
+            if include_mcp_tools and req.use_mcp_tools:
+                try:
+                    user_mcp_config = _load_user_mcp_config(
+                        current_user.get("mcp_config", ""),
+                        current_user.get("workspace_root", ""),
+                    )
+                    resolved_mcp_config = _resolve_and_validate_user_mcp_config(
+                        user_mcp_config,
+                        current_user.get("workspace_root", ""),
+                    )
+                    if resolved_mcp_config.get("mcpServers"):
+                        tools.append(resolved_mcp_config)
+                except HTTPException as exc:
+                    log.warning("Skipping MCP tools for user %s: %s", current_user.get("id"), exc.detail)
+                except Exception as exc:
+                    log.warning("Skipping MCP tools for user %s: %s", current_user.get("id"), exc)
             return tools
 
-        def _payload(msgs: list[dict]) -> dict:
-            payload = {
-                "model": requested_model,
-                "messages": msgs,
-                "think": req.think,
-                "stream": True,
-            }
-            tools = _build_tools_list()
-            if tools:
-                payload["tools"] = tools
-            return payload
+        def _next_from_iter(it):
+            try:
+                return True, next(it)
+            except StopIteration:
+                return False, None
 
         try:
-            async with aiohttp.ClientSession() as session:
-                for iteration in range(MAX_TOOL_ITERATIONS):
-                    turn_content = ""
-                    turn_thinking = ""
-                    turn_tool_calls: list[dict] = []
+            if not QWEN_AGENT_RUNTIME_AVAILABLE:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'qwen-agent runtime is not installed; cannot start Assistant.run()'})}\n\n"
+                return
 
-                    async with session.post(OLLAMA_URL, json=_payload(working_msgs)) as resp:
-                        if resp.status != 200:
-                            body = await resp.text()
-                            yield f"data: {json.dumps({'type': 'error', 'message': body})}\n\n"
-                            return
+            # Tool-call mode is configurable because some Ollama model/build combinations
+            # only execute tools reliably when qwen-agent handles function-call prompting.
+            raw_api_env = (os.getenv("QWEN_AGENT_USE_RAW_API", "0") or "0").strip().lower()
+            use_raw_api = raw_api_env in {"1", "true", "yes", "on"}
+            fncall_prompt_type = (os.getenv("QWEN_AGENT_FNCALL_PROMPT_TYPE", "nous") or "").strip()
 
-                        # Stream chunks to the frontend immediately while collecting tool calls.
-                        async for raw_line in resp.content:
-                            line = raw_line.decode("utf-8").strip()
-                            if not line:
-                                continue
-                            try:
-                                chunk = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
+            generate_cfg: dict = {"use_raw_api": use_raw_api}
+            if fncall_prompt_type:
+                generate_cfg["fncall_prompt_type"] = fncall_prompt_type
 
-                            msg_chunk = chunk.get("message", {})
-                            td = msg_chunk.get("thinking", "")
-                            cd = msg_chunk.get("content", "")
+            # OpenAI-compatible clients reject unknown top-level args like `think`.
+            # Pass reasoning toggle via extra_body for backends (e.g. Ollama) that support it.
+            if req.think is not None:
+                generate_cfg["extra_body"] = {"think": bool(req.think)}
 
-                            if td:
-                                turn_thinking += td
-                                all_thinking += td
-                                yield f"data: {json.dumps({'type': 'thinking', 'delta': td})}\n\n"
+            llm_cfg = {
+                "model": requested_model,
+                "model_server": OLLAMA_OPENAI_URL,
+                "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
+                "generate_cfg": generate_cfg,
+            }
 
-                            if cd:
-                                turn_content += cd
-                                final_content += cd
-                                yield f"data: {json.dumps({'type': 'content', 'delta': cd})}\n\n"
+            function_list = _build_agent_function_list(include_mcp_tools=True)
+            try:
+                agent = Assistant(
+                    function_list=function_list,
+                    llm=get_chat_model(llm_cfg),
+                    system_message="",
+                )
+            except Exception as exc:
+                # Fail-open: if MCP startup fails (missing launcher, server boot failure, etc.),
+                # retry once without MCP so chat remains available.
+                if req.use_mcp_tools:
+                    log.warning("Assistant init with MCP failed; retrying without MCP tools: %s", exc)
+                    agent = Assistant(
+                        function_list=_build_agent_function_list(include_mcp_tools=False),
+                        llm=get_chat_model(llm_cfg),
+                        system_message="",
+                    )
+                else:
+                    raise
+            response_iter = agent.run(messages=working_msgs, lang="en")
 
-                            maybe_tool_calls = msg_chunk.get("tool_calls")
-                            if isinstance(maybe_tool_calls, list) and maybe_tool_calls:
-                                turn_tool_calls.extend(maybe_tool_calls)
+            prev_content = ""
+            prev_thinking = ""
+            seen_function_messages = 0
 
-                    # ── Turn complete ──
-                    if not turn_tool_calls:
-                        # No tools — answer is complete
-                        break
+            while True:
+                has_item, rsp = await asyncio.to_thread(_next_from_iter, response_iter)
+                if not has_item:
+                    break
+                if not isinstance(rsp, list):
+                    continue
 
-                    # Execute tool calls and inject results
-                    for tool_call in turn_tool_calls:
-                        tool_name = tool_call.get("function", {}).get("name", "")
-                        raw_tool_args = tool_call.get("function", {}).get("arguments", {})
-                        if isinstance(raw_tool_args, str):
-                            try:
-                                tool_args = json.loads(raw_tool_args) if raw_tool_args.strip() else {}
-                            except json.JSONDecodeError:
-                                tool_args = {}
-                        elif isinstance(raw_tool_args, dict):
-                            tool_args = raw_tool_args
-                        else:
-                            tool_args = {}
-                        approval_cmd_id = tool_call.get("id", "") or str(uuid.uuid4())
-                        
+                # Stream content + reasoning deltas.
+                # Scan forward through all messages so the LAST non-empty value wins.
+                # With use_raw_api=True qwen-agent emits separate Message objects for
+                # reasoning_content and response content (not combined), so a single
+                # reversed-lookup would miss one of them.  Both plain dicts and qwen-agent
+                # Message objects (BaseModelCompatibleDict) expose a .get() method.
+                content_now = prev_content
+                thinking_now = prev_thinking
+                for msg in rsp:
+                    if not (hasattr(msg, "get") and msg.get("role") == "assistant"):
+                        continue
+                    c = str(msg.get("content") or "")
+                    t = str(msg.get("reasoning_content") or msg.get("thinking") or "")
+                    if c:
+                        content_now = c
+                    if t:
+                        thinking_now = t
+
+                # Some models return reasoning inside <think>...</think> tags in content
+                # instead of reasoning_content. Surface that in the UI thinking stream.
+                tagged_thinking = [
+                    m.group(1).strip()
+                    for m in THINK_TAG_RE.finditer(content_now)
+                    if m.group(1).strip()
+                ]
+                if tagged_thinking:
+                    content_now = THINK_TAG_RE.sub("", content_now).strip()
+                    tagged_text = "\n\n".join(tagged_thinking)
+                    if thinking_now.strip():
+                        thinking_now = f"{thinking_now.strip()}\n\n{tagged_text}"
+                    else:
+                        thinking_now = tagged_text
+
+                # Detect pseudo tool tags in the final content delta.  When the
+                # model is in text-narration mode instead of structured tool-call
+                # mode it writes things like <function=list_dir> directly into
+                # the assistant content.  Emit a one-time warning event so the
+                # frontend can surface an actionable message to the user.
+                if content_now and not getattr(event_stream, '_pseudo_tag_warned', False):
+                    pseudo_matches = PSEUDO_TOOL_TAG_RE.findall(content_now)
+                    if pseudo_matches:
+                        event_stream._pseudo_tag_warned = True  # type: ignore[attr-defined]
+                        hint = (
+                            "Tool-mode mismatch: the model is writing tool calls as plain text "
+                            f"({pseudo_matches[0]!r}) instead of executing them. "
+                            "Try toggling QWEN_AGENT_USE_RAW_API (currently "
+                            + str(use_raw_api) + "). "
+                            "Restart the server after changing the value in .env."
+                        )
+                        log.warning("Pseudo tool tag detected in assistant content: %s", pseudo_matches[0])
+                        yield f"data: {json.dumps({'type': 'tool_mode_warning', 'message': hint})}\n\n"
+
+                if content_now.startswith(prev_content):
+                    content_delta = content_now[len(prev_content):]
+                else:
+                    content_delta = content_now
+                if content_delta:
+                    yield f"data: {json.dumps({'type': 'content', 'delta': content_delta})}\n\n"
+
+                if thinking_now.startswith(prev_thinking):
+                    thinking_delta = thinking_now[len(prev_thinking):]
+                else:
+                    thinking_delta = thinking_now
+                if thinking_delta:
+                    yield f"data: {json.dumps({'type': 'thinking', 'delta': thinking_delta})}\n\n"
+
+                prev_content = content_now
+                prev_thinking = thinking_now
+                final_content = content_now
+                all_thinking = thinking_now
+
+                # Track tool execution counts from appended function messages.
+                # Use hasattr(.get) instead of isinstance(dict) so qwen-agent Message
+                # objects (returned by the use_raw_api path) are also detected.
+                function_msgs = [
+                    m for m in rsp
+                    if hasattr(m, "get") and m.get("role") in ("function", "tool")
+                ]
+                if len(function_msgs) > seen_function_messages:
+                    for fm in function_msgs[seen_function_messages:]:
+                        tool_name = fm.get("name", "")
+                        tool_content = str(fm.get("content") or "")
                         tools_called += 1
-                        
-                        if tool_name == "execute_command":
-                            commands_run += 1
-                            # Emit permission_required event
-                            yield f"data: {json.dumps({'type': 'permission_required', 'cmd_id': approval_cmd_id, 'command': tool_args.get('command', ''), 'cwd': tool_args.get('cwd', '')})}\n\n"
-                        elif tool_name in ("read_file",):
+                        if tool_name == "code_interpreter":
+                            code_runs += 1
+                        elif tool_name == "read_file":
                             file_reads += 1
                         elif tool_name in ("write_file", "replace_in_file", "create_directory"):
                             file_writes += 1
-                        
-                        # Emit tool_call event
-                        yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': tool_args})}\n\n"
-                        
-                        # Execute the tool
-                        success, result = await execute_tool(
-                            tool_name,
-                            tool_args,
-                            current_user,
-                            current_user["id"],
-                            approval_cmd_id if tool_name == "execute_command" else None,
-                        )
-                        
-                        # Emit tool_result event
-                        summary = result[:200] if len(result) > 200 else result
-                        yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': success, 'summary': summary})}\n\n"
-                        
-                        # Inject tool result into conversation
-                        working_msgs.append({
-                            "role": "assistant",
-                            "content": turn_content,
-                            "tool_calls": [tool_call],
-                            **({"thinking": turn_thinking} if turn_thinking else {}),
-                        })
-                        working_msgs.append({
-                            "role": "tool",
-                            "content": result,
-                            "tool_call_id": tool_call.get("id", ""),
-                        })
-
-                    # If we handled tool calls, loop to next turn
-                    if turn_tool_calls:
-                        # Reset content accumulators for next turn
-                        turn_content = ""
-                        turn_thinking = ""
-                        turn_tool_calls = []
-                        continue
+                        elif tool_name == "gml_docs_search":
+                            gml_snippet_count += len(re.findall(r"^\[\d+\]", tool_content, flags=re.MULTILINE))
+                        elif tool_name == "ps_docs_search":
+                            ps_snippet_count += len(re.findall(r"^\[\d+\]", tool_content, flags=re.MULTILINE))
+                    seen_function_messages = len(function_msgs)
 
             # Stream completed successfully
             token_count = estimate_tokens(final_content + all_thinking)
-            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'commands_run': commands_run, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': bool(gml_snippets), 'gml_snippet_count': len(gml_snippets), 'ps_docs_used': bool(ps_snippets), 'ps_docs_snippet_count': len(ps_snippets)})}\n\n"
-
-        except aiohttp.ClientConnectorError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Cannot connect to Ollama. Is it running? (ollama serve)'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'commands_run': code_runs, 'code_runs': code_runs, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': gml_snippet_count > 0, 'gml_snippet_count': gml_snippet_count, 'ps_docs_used': ps_snippet_count > 0, 'ps_docs_snippet_count': ps_snippet_count})}\n\n"
         except Exception as exc:
             log.exception("Streaming error")
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"

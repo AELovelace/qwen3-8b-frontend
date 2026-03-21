@@ -113,10 +113,10 @@ This project is a local-first chat application with a thin frontend and a FastAP
 
 - Search capability is advertised in a system prompt.
 - Model can request search using exact `<search>...</search>` tags.
-- Backend runs up to 3 search iterations.
-- For each query, backend emits `search_start` and `search_done` events.
-- Search results are re-injected as a user message asking for final answer.
-- If no tags are requested, backend emits direct answer and ends loop.
+- Backend uses Qwen-Agent `Assistant.run()` for the model/tool loop.
+- Tool calls are handled by registered BaseTools, MCP servers, and the Docker code interpreter.
+- File operations stay sandboxed to the configured workspace root.
+- GML/PowerShell RAG snippets and FTS memory are prepended as system context before the run.
 
 ## Streaming Protocol (SSE)
 
@@ -124,9 +124,9 @@ The backend sends newline-delimited SSE `data:` JSON payloads:
 
 - `thinking`: incremental reasoning text
 - `content`: incremental assistant answer text
-- `search_start`: query started or skipped
-- `search_done`: query complete + result count
-- `done`: final metadata (`token_count`, `fts_used`, `searches_done`)
+- `tool_call`: tool invocation started
+- `tool_result`: tool invocation completed
+- `done`: final metadata (`token_count`, `fts_used`, `tools_called`, `code_runs`)
 - `error`: runtime/upstream failure message
 
 The frontend keeps one assistant message shell open and updates it incrementally.
@@ -137,17 +137,19 @@ The frontend keeps one assistant message shell open and updates it incrementally
 2. Frontend ensures session by validating token (`/api/auth/me`).
 3. Frontend ensures conversation exists under current user.
 4. Frontend POSTs to `/api/chat` with bearer token.
-5. Backend authorizes conversation ownership, assembles context, and calls Ollama.
-6. Backend relays SSE deltas to browser.
-7. Optional search loop runs if model emits search tags.
+5. Backend authorizes conversation ownership, assembles context, and starts a Qwen-Agent assistant run.
+6. Assistant may call registered tools, MCP tools, or the Docker code interpreter as needed.
+7. Backend relays SSE deltas to browser.
 8. Backend saves user + assistant messages to SQLite.
-9. Frontend updates badges (FTS used, search count) and refreshes conversation list.
+9. Frontend updates badges and refreshes conversation list.
 
 ## Reliability and Failure Handling
 
 - Ollama connection failure returns SSE `error` or HTTP 503.
 - Brave API failures are logged and represented as empty/skipped results.
 - Database operations are committed per request and closed in `finally` paths.
+- Docker availability gates the `code_interpreter` tool.
+- Per-user MCP configs are validated before being passed to Qwen-Agent.
 - Streaming errors do not prevent best-effort persistence of partial final output.
 
 ## Security and Trust Boundaries
