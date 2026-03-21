@@ -156,10 +156,16 @@ Notes:
 
 ### Tool-calling mode
 
-- `QWEN_AGENT_USE_RAW_API` controls whether raw OpenAI-style tool-calling is used (`0` by default).
-- `QWEN_AGENT_FNCALL_PROMPT_TYPE` controls qwen-agent function-call prompting style (`nous` by default).
-- For Ollama builds where the model prints pseudo tool tags instead of executing tools, keep `QWEN_AGENT_USE_RAW_API=0`.
-- If your backend and model support native OpenAI `tool_calls` reliably, set `QWEN_AGENT_USE_RAW_API=1`.
+- **Native tool-calling (Raw API)** is enforced globally.
+- Tools are always sent to the model via the native OpenAI `tool_calls` format (`use_raw_api=True`).
+- Prompt-injection function-calling mode is no longer used by default runtime flow.
+- `QWEN_AGENT_FNCALL_PROMPT_TYPE` may still be present for compatibility, but OpenAI-style raw tool-calls are the active execution path.
+
+### MCP-first tool strategy
+
+- When MCP tools are enabled, filesystem operations go through the MCP filesystem server instead of native file tools.
+- Only `gml_docs_search`, `ps_docs_search`, `web_search`, and `code_interpreter` remain as native/local tools (they have no MCP equivalent).
+- When MCP is disabled, native file tools (`read_file`, `write_file`, `list_dir`, etc.) are used instead.
 
 ### Brave API key
 
