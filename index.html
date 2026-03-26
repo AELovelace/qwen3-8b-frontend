@@ -256,6 +256,8 @@
     color: var(--text) !important;
   }
   #brave-save-btn,
+  #reindex-working-dir-btn,
+  #admin-reindex-codebase-btn,
   #admin-create-invite-btn,
   #admin-persona-save-btn,
   #open-admin-panel-btn {
@@ -271,6 +273,8 @@
     transition: border-color 0.15s, color 0.15s;
   }
   #brave-save-btn:hover,
+  #reindex-working-dir-btn:hover,
+  #admin-reindex-codebase-btn:hover,
   #admin-create-invite-btn:hover,
   #admin-persona-save-btn:hover,
   #open-admin-panel-btn:hover { border-color: var(--accent); color: var(--text); }
@@ -572,6 +576,30 @@
   #send-btn:disabled { background: var(--surface2); opacity: 0.5; cursor: not-allowed; }
   #send-btn:not(:disabled):hover { background: var(--accent-dim); }
   #send-btn svg { pointer-events: none; }
+
+  #stop-btn {
+    height: 32px;
+    border-radius: 7px;
+    border: 1px solid rgba(255, 107, 107, 0.35);
+    background: rgba(255, 107, 107, 0.15);
+    color: #ffd1d1;
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0 10px;
+    flex-shrink: 0;
+    font-size: 12px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #stop-btn:hover:not(:disabled) {
+    background: rgba(255, 107, 107, 0.28);
+    border-color: rgba(255, 107, 107, 0.5);
+  }
+  #stop-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
 
   #input-hints {
     max-width: 860px;
@@ -1155,6 +1183,7 @@
             <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
           </svg>
         </button>
+        <button id="stop-btn" type="button" title="Stop request">Stop</button>
       </div>
       <div id="input-hints">
         <span>Enter to send</span>
@@ -1226,6 +1255,11 @@
             <input id="working-subdir-input" type="text" placeholder="e.g. src or project/subdir (blank = workspace root)" autocomplete="off" />
             <button id="working-subdir-apply-btn" type="button">Apply Subdirectory</button>
             <div id="working-subdir-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group">
+            <label>Codebase Index</label>
+            <button id="reindex-working-dir-btn" type="button">Reindex Current Working Directory</button>
+            <div id="codebase-index-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
           </div>
           <div class="setting-group">
             <label>File Explorer</label>
@@ -1311,6 +1345,7 @@
               </label>
             </div>
             <button id="admin-global-tools-save-btn" type="button">Save Global Toggles</button>
+            <button id="admin-reindex-codebase-btn" type="button">Reindex Codebase (Current Working Dir)</button>
             <div id="admin-global-tools-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
           </div>
         </section>
@@ -1357,6 +1392,7 @@
 /* ── State ──────────────────────────────────────────────────────────── */
 let activeConvId = null;
 let streaming = false;
+let streamAbortController = null;
 let authToken = localStorage.getItem('auth_token') || '';
 let currentUser = null;
 
@@ -1374,6 +1410,7 @@ const messagesEl = document.getElementById('messages');
 const emptyEl = document.getElementById('empty-state');
 const userInput = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
+const stopBtn = document.getElementById('stop-btn');
 const modelInput = document.getElementById('model-input');
 const gmlDocsToggle = document.getElementById('gml-docs-toggle');
 const gmlStatusEl = document.getElementById('gml-status');
@@ -1390,6 +1427,8 @@ const mcpToolsStatusEl = document.getElementById('mcp-tools-status');
 const workingSubdirInput = document.getElementById('working-subdir-input');
 const workingSubdirApplyBtn = document.getElementById('working-subdir-apply-btn');
 const workingSubdirStatusEl = document.getElementById('working-subdir-status');
+const reindexWorkingDirBtn = document.getElementById('reindex-working-dir-btn');
+const codebaseIndexStatusEl = document.getElementById('codebase-index-status');
 const fileExplorerEl = document.getElementById('file-explorer');
 const newChatBtn = document.getElementById('new-chat-btn');
 
@@ -1411,6 +1450,7 @@ const adminGlobalPsExecSelect = document.getElementById('admin-global-ps-exec-se
 const adminGlobalMcpToggle = document.getElementById('admin-global-mcp-toggle');
 const adminGlobalRawApiToggle = document.getElementById('admin-global-raw-api-toggle');
 const adminGlobalToolsSaveBtn = document.getElementById('admin-global-tools-save-btn');
+const adminReindexCodebaseBtn = document.getElementById('admin-reindex-codebase-btn');
 const adminGlobalToolsStatusEl = document.getElementById('admin-global-tools-status');
 const adminPersonaInputEl = document.getElementById('admin-persona-input');
 const adminPersonaSaveBtn = document.getElementById('admin-persona-save-btn');
@@ -1496,6 +1536,58 @@ function setWorkingSubdirStatus(message, isError = false) {
   workingSubdirStatusEl.style.color = isError ? 'var(--error)' : 'var(--text-dim)';
 }
 
+function setCodebaseIndexStatus(message, isError = false) {
+  if (!codebaseIndexStatusEl) return;
+  codebaseIndexStatusEl.textContent = message;
+  codebaseIndexStatusEl.style.color = isError ? 'var(--error)' : 'var(--text-dim)';
+}
+
+async function reindexCodebaseForWorkingDir(workingSubdir, statusSetter, buttonEl) {
+  if (!currentUser) return;
+  if (buttonEl) buttonEl.disabled = true;
+  statusSetter('Reindexing codebase...');
+  try {
+    const res = await apiFetch('/api/codebase/index/rebuild', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        working_subdir: (workingSubdir || '').trim(),
+        force: true,
+      }),
+    });
+    const data = await res.json();
+    statusSetter(`Indexed ${data.file_count || 0} files into ${data.chunk_count || 0} chunks`);
+    await loadBraveStatus();
+  } catch (err) {
+    statusSetter(err.message || 'Reindex failed', true);
+  } finally {
+    if (buttonEl) buttonEl.disabled = false;
+  }
+}
+
+function openFileEditorPopup(filePath) {
+  const path = (filePath || '').trim();
+  if (!path) return;
+
+  const params = new URLSearchParams({ path });
+  const workingSubdir = getWorkingSubdir();
+  if (workingSubdir) params.set('working_subdir', workingSubdir);
+
+  const popupName = `file-editor-${path.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const popup = window.open(
+    `/resources/file-editor-popup.html?${params.toString()}`,
+    popupName,
+    'popup=yes,width=1180,height=860,resizable=yes,scrollbars=yes'
+  );
+
+  if (!popup) {
+    setWorkingSubdirStatus('Popup blocked by the browser. Allow popups for this site to open the editor.', true);
+    return;
+  }
+
+  popup.focus();
+}
+
 function renderFileExplorer(cwd, entries) {
   if (!fileExplorerEl) return;
   fileExplorerEl.innerHTML = '';
@@ -1517,10 +1609,13 @@ function renderFileExplorer(cwd, entries) {
     const item = document.createElement('button');
     item.className = `explorer-item ${entry.is_dir ? 'dir' : 'file'}`;
     item.textContent = entry.is_dir ? `📁 ${entry.name}` : `📄 ${entry.name}`;
+    item.title = entry.is_dir
+      ? `Open ${entry.name}`
+      : `Double-click to edit ${entry.name} in a popup window`;
     if (entry.is_dir) {
       item.addEventListener('click', () => loadFileExplorer(entry.path));
     } else {
-      item.disabled = true;
+      item.addEventListener('dblclick', () => openFileEditorPopup(entry.path));
     }
     fileExplorerEl.appendChild(item);
   }
@@ -1992,7 +2087,11 @@ function highlightCode(element) {
 }
 
 function renderAssistantBubble(bubble, rawText) {
-  const markdownSource = String(rawText ?? '');
+  const raw = String(rawText ?? '');
+  const markdownSource = raw
+    .replace(/<\s*function\s*=\s*[a-zA-Z0-9_:\-]+\s*>[\s\S]*?<\s*\/\s*function\s*>/gi, '')
+    .replace(/<\s*\/?\s*tool_call\s*>/gi, '')
+    .trim();
   bubble.dataset.rawMarkdown = markdownSource;
 
   const rendered = renderMarkdown(markdownSource);
@@ -2130,6 +2229,11 @@ async function handleSend() {
 
   streaming = true;
   sendBtn.disabled = true;
+  if (stopBtn) {
+    stopBtn.disabled = false;
+    stopBtn.style.display = 'inline-flex';
+  }
+  streamAbortController = new AbortController();
 
   const {
     thinkingContent,
@@ -2159,6 +2263,7 @@ async function handleSend() {
     const res = await apiFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: streamAbortController.signal,
       body: JSON.stringify({
         conversation_id: activeConvId,
         message: text,
@@ -2324,14 +2429,36 @@ async function handleSend() {
       }
     }
   } catch (err) {
-    contentBubble.classList.remove('cursor');
-    contentBubble.className = 'error-bubble';
-    contentBubble.textContent = `Connection error: ${err.message || err}`;
+    const isAbort = !!(streamAbortController && streamAbortController.signal && streamAbortController.signal.aborted);
+    if (isAbort || err?.name === 'AbortError') {
+      contentBubble.classList.remove('cursor');
+      spinner.style.display = 'none';
+      if (!assistantRawContent.trim()) {
+        contentBubble.textContent = '[Response stopped by user]';
+      }
+    } else {
+      contentBubble.classList.remove('cursor');
+      contentBubble.className = 'error-bubble';
+      contentBubble.textContent = `Connection error: ${err.message || err}`;
+    }
   } finally {
     streaming = false;
     sendBtn.disabled = false;
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      stopBtn.style.display = 'none';
+    }
+    streamAbortController = null;
     userInput.focus();
   }
+}
+
+if (stopBtn) {
+  stopBtn.addEventListener('click', () => {
+    if (!streaming || !streamAbortController) return;
+    stopBtn.disabled = true;
+    streamAbortController.abort();
+  });
 }
 
 /* ── Brave API key settings ─────────────────────────────────────────── */
@@ -2375,6 +2502,18 @@ async function loadBraveStatus() {
       psStatusEl.textContent = data.ps_docs_error || 'No /indexed-docs/ps-docs markdown index available';
       psStatusEl.style.color = 'var(--error)';
     }
+
+    if (typeof data.codebase_index_enabled === 'boolean') {
+      if (data.codebase_index_enabled) {
+        const rootLabel = data.codebase_index_root || 'workspace root';
+        const embLabel = data.codebase_embeddings_enabled
+          ? ' • semantic search ready'
+          : (data.codebase_embeddings_building ? ' • building semantic index…' : '');
+        setCodebaseIndexStatus(`Indexed ${data.codebase_index_file_count || 0} files / ${data.codebase_index_chunk_count || 0} chunks (${rootLabel})${embLabel}`);
+      } else {
+        setCodebaseIndexStatus(data.codebase_index_error || 'Codebase index not built yet');
+      }
+    }
   } catch {
     braveStatusEl.textContent = 'Could not load key status';
     braveStatusEl.style.color = 'var(--error)';
@@ -2382,6 +2521,7 @@ async function loadBraveStatus() {
     gmlStatusEl.style.color = 'var(--error)';
     psStatusEl.textContent = 'Could not load PowerShell docs index status';
     psStatusEl.style.color = 'var(--error)';
+    setCodebaseIndexStatus('Could not load codebase index status', true);
   }
 }
 
@@ -2841,6 +2981,12 @@ if (workingSubdirApplyBtn) {
   });
 }
 
+if (reindexWorkingDirBtn) {
+  reindexWorkingDirBtn.addEventListener('click', async () => {
+    await reindexCodebaseForWorkingDir(getWorkingSubdir(), setCodebaseIndexStatus, reindexWorkingDirBtn);
+  });
+}
+
 if (adminGlobalToolsSaveBtn) {
   adminGlobalToolsSaveBtn.addEventListener('click', async () => {
     adminGlobalToolsSaveBtn.disabled = true;
@@ -2868,6 +3014,17 @@ if (adminGlobalToolsSaveBtn) {
     } finally {
       adminGlobalToolsSaveBtn.disabled = false;
     }
+  });
+}
+
+if (adminReindexCodebaseBtn) {
+  adminReindexCodebaseBtn.addEventListener('click', async () => {
+    const subdir = (workingSubdirInput?.value || getWorkingSubdir() || '').trim();
+    const setAdminReindexStatus = (message, isError = false) => {
+      adminGlobalToolsStatusEl.textContent = message;
+      adminGlobalToolsStatusEl.style.color = isError ? 'var(--error)' : 'var(--text-dim)';
+    };
+    await reindexCodebaseForWorkingDir(subdir, setAdminReindexStatus, adminReindexCodebaseBtn);
   });
 }
 
