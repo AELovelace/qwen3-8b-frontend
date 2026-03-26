@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File Editor</title>
+  <style>
+    :root {
+      --bg: #f5efe3;
+      --panel: rgba(255, 252, 246, 0.96);
+      --panel-strong: #fffaf0;
+      --border: rgba(96, 72, 40, 0.18);
+      --text: #2d2216;
+      --text-dim: #75624a;
+      --accent: #ad5c2b;
+      --accent-strong: #8d4519;
+      --error: #a3332a;
+      --ok: #2e6b45;
+      --shadow: 0 18px 50px rgba(70, 43, 17, 0.12);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(208, 151, 96, 0.18), transparent 34%),
+        linear-gradient(180deg, #f7f2e9 0%, #efe3d2 100%);
+      color: var(--text);
+      font: 14px/1.45 Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    }
+
+    body {
+      padding: 18px;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      gap: 12px;
+      height: 100%;
+    }
+
+    .bar,
+    .status,
+    .editor-shell {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .bar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 16px;
+      align-items: center;
+      padding: 16px 18px;
+    }
+
+    .meta {
+      min-width: 0;
+    }
+
+    .eyebrow {
+      margin: 0 0 4px;
+      color: var(--text-dim);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .path {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .subdir {
+      margin-top: 6px;
+      color: var(--text-dim);
+      font-size: 12px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    button {
+      border: 1px solid rgba(118, 72, 30, 0.22);
+      border-radius: 999px;
+      background: var(--panel-strong);
+      color: var(--text);
+      padding: 10px 16px;
+      cursor: pointer;
+      font: inherit;
+      transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      border-color: rgba(141, 69, 25, 0.5);
+      background: #fffdf8;
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+
+    .save-btn {
+      background: linear-gradient(180deg, #c66c32 0%, #ad5c2b 100%);
+      color: #fff9f4;
+      border-color: rgba(105, 41, 8, 0.35);
+    }
+
+    .save-btn:hover:not(:disabled) {
+      background: linear-gradient(180deg, #bf642d 0%, #8d4519 100%);
+    }
+
+    .status {
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--text-dim);
+    }
+
+    .status strong {
+      color: var(--text);
+    }
+
+    .status.error {
+      color: var(--error);
+      border-color: rgba(163, 51, 42, 0.24);
+    }
+
+    .status.success {
+      color: var(--ok);
+      border-color: rgba(46, 107, 69, 0.24);
+    }
+
+    .editor-shell {
+      overflow: hidden;
+      min-height: 0;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(250, 244, 234, 0.94));
+    }
+
+    #editor-host,
+    #fallback-editor {
+      height: 100%;
+      width: 100%;
+    }
+
+    #fallback-editor {
+      display: none;
+      border: 0;
+      resize: none;
+      padding: 18px;
+      background: transparent;
+      color: var(--text);
+      font: 13px/1.55 Consolas, "SFMono-Regular", monospace;
+      outline: none;
+    }
+
+    .cm-editor {
+      height: 100%;
+      background: transparent;
+    }
+
+    .cm-scroller {
+      overflow: auto;
+      font-family: Consolas, "SFMono-Regular", monospace;
+      line-height: 1.55;
+    }
+
+    .cm-focused {
+      outline: none;
+    }
+
+    .cm-gutters {
+      background: rgba(118, 72, 30, 0.05);
+      border-right: 1px solid rgba(118, 72, 30, 0.1);
+    }
+
+    @media (max-width: 760px) {
+      body { padding: 10px; }
+      .bar {
+        grid-template-columns: 1fr;
+      }
+      .actions {
+        justify-content: stretch;
+      }
+      .actions button {
+        flex: 1 1 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="bar">
+      <div class="meta">
+        <p class="eyebrow">Popup Editor</p>
+        <h1 class="path" id="path-label">Loading...</h1>
+        <div class="subdir" id="subdir-label">Workspace root</div>
+      </div>
+      <div class="actions">
+        <button id="reload-btn" type="button">Reload</button>
+        <button id="save-btn" class="save-btn" type="button">Save</button>
+        <button id="close-btn" type="button">Close</button>
+      </div>
+    </section>
+
+    <section class="status" id="status-line">
+      <span id="status-text">Preparing editor...</span>
+      <span id="meta-text">Ctrl+S saves</span>
+    </section>
+
+    <section class="editor-shell">
+      <div id="editor-host"></div>
+      <textarea id="fallback-editor" spellcheck="false"></textarea>
+    </section>
+  </div>
+
+  <script type="module">
+    const params = new URLSearchParams(window.location.search);
+    const filePath = (params.get('path') || '').trim();
+    const workingSubdir = (params.get('working_subdir') || '').trim();
+
+    const pathLabel = document.getElementById('path-label');
+    const subdirLabel = document.getElementById('subdir-label');
+    const statusLine = document.getElementById('status-line');
+    const statusText = document.getElementById('status-text');
+    const metaText = document.getElementById('meta-text');
+    const editorHost = document.getElementById('editor-host');
+    const fallbackEditor = document.getElementById('fallback-editor');
+    const saveBtn = document.getElementById('save-btn');
+    const reloadBtn = document.getElementById('reload-btn');
+    const closeBtn = document.getElementById('close-btn');
+
+    let editorView = null;
+    let readOnlyFallback = false;
+    let cleanValue = '';
+    let isSaving = false;
+
+    function authToken() {
+      return window.localStorage.getItem('auth_token') || '';
+    }
+
+    function setStatus(message, tone = 'neutral') {
+      statusText.textContent = message;
+      statusLine.classList.remove('error', 'success');
+      if (tone === 'error') statusLine.classList.add('error');
+      if (tone === 'success') statusLine.classList.add('success');
+    }
+
+    function currentContent() {
+      return editorView ? editorView.state.doc.toString() : fallbackEditor.value;
+    }
+
+    function isDirty() {
+      return currentContent() !== cleanValue;
+    }
+
+    function refreshWindowTitle() {
+      const prefix = isDirty() ? '* ' : '';
+      document.title = `${prefix}${filePath || 'File Editor'}`;
+      metaText.textContent = isDirty() ? 'Unsaved changes' : 'Ctrl+S saves';
+    }
+
+    function markClean(value) {
+      cleanValue = value;
+      refreshWindowTitle();
+    }
+
+    async function apiFetch(url, options = {}) {
+      const headers = new Headers(options.headers || {});
+      const token = authToken();
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+      const res = await fetch(url, { ...options, headers });
+      if (res.status === 401) {
+        throw new Error('Unauthorized. Please log in again in the main window.');
+      }
+      if (!res.ok) {
+        const body = await res.text();
+        let message = body || `Request failed (${res.status})`;
+        try {
+          const parsed = JSON.parse(body);
+          if (parsed.detail) message = parsed.detail;
+        } catch {}
+        throw new Error(message);
+      }
+      return res;
+    }
+
+    function extensionForPath(path) {
+      const lower = path.toLowerCase();
+      if (lower.endsWith('.py')) return 'python';
+      if (lower.endsWith('.json')) return 'json';
+      if (lower.endsWith('.js') || lower.endsWith('.mjs') || lower.endsWith('.cjs') || lower.endsWith('.jsx')) return 'javascript';
+      if (lower.endsWith('.ts') || lower.endsWith('.tsx')) return 'typescript';
+      if (lower.endsWith('.md')) return 'markdown';
+      if (lower.endsWith('.html')) return 'html';
+      if (lower.endsWith('.css')) return 'css';
+      if (lower.endsWith('.xml') || lower.endsWith('.svg')) return 'xml';
+      if (lower.endsWith('.yml') || lower.endsWith('.yaml')) return 'yaml';
+      if (lower.endsWith('.sql')) return 'sql';
+      if (lower.endsWith('.java')) return 'java';
+      if (lower.endsWith('.php')) return 'php';
+      if (lower.endsWith('.rs')) return 'rust';
+      if (lower.endsWith('.c') || lower.endsWith('.cc') || lower.endsWith('.cpp') || lower.endsWith('.h') || lower.endsWith('.hpp')) return 'cpp';
+      return '';
+    }
+
+    async function buildLanguageExtension(kind) {
+      switch (kind) {
+        case 'python': {
+          const mod = await import('https://esm.sh/@codemirror/lang-python@6.1.6');
+          return mod.python();
+        }
+        case 'json': {
+          const mod = await import('https://esm.sh/@codemirror/lang-json@6.0.1');
+          return mod.json();
+        }
+        case 'javascript': {
+          const mod = await import('https://esm.sh/@codemirror/lang-javascript@6.2.2');
+          return mod.javascript();
+        }
+        case 'typescript': {
+          const mod = await import('https://esm.sh/@codemirror/lang-javascript@6.2.2');
+          return mod.javascript({ typescript: true, jsx: filePath.toLowerCase().endsWith('.tsx') });
+        }
+        case 'markdown': {
+          const mod = await import('https://esm.sh/@codemirror/lang-markdown@6.3.2');
+          return mod.markdown();
+        }
+        case 'html': {
+          const mod = await import('https://esm.sh/@codemirror/lang-html@6.4.9');
+          return mod.html();
+        }
+        case 'css': {
+          const mod = await import('https://esm.sh/@codemirror/lang-css@6.2.1');
+          return mod.css();
+        }
+        case 'xml': {
+          const mod = await import('https://esm.sh/@codemirror/lang-xml@6.1.0');
+          return mod.xml();
+        }
+        case 'yaml': {
+          const mod = await import('https://esm.sh/@codemirror/lang-yaml@6.1.2');
+          return mod.yaml();
+        }
+        case 'sql': {
+          const mod = await import('https://esm.sh/@codemirror/lang-sql@6.6.1');
+          return mod.sql();
+        }
+        case 'java': {
+          const mod = await import('https://esm.sh/@codemirror/lang-java@6.0.1');
+          return mod.java();
+        }
+        case 'php': {
+          const mod = await import('https://esm.sh/@codemirror/lang-php@6.0.2');
+          return mod.php();
+        }
+        case 'rust': {
+          const mod = await import('https://esm.sh/@codemirror/lang-rust@6.0.1');
+          return mod.rust();
+        }
+        case 'cpp': {
+          const mod = await import('https://esm.sh/@codemirror/lang-cpp@6.0.2');
+          return mod.cpp();
+        }
+        default:
+          return [];
+      }
+    }
+
+    async function initializeCodeMirror(initialContent) {
+      const [{EditorState}, {EditorView}, {basicSetup}] = await Promise.all([
+        import('https://esm.sh/@codemirror/state@6.4.1'),
+        import('https://esm.sh/@codemirror/view@6.36.1'),
+        import('https://esm.sh/codemirror@6.0.1'),
+      ]);
+
+      const languageExtension = await buildLanguageExtension(extensionForPath(filePath));
+      editorView = new EditorView({
+        state: EditorState.create({
+          doc: initialContent,
+          extensions: [
+            basicSetup,
+            EditorView.lineWrapping,
+            EditorView.updateListener.of(() => refreshWindowTitle()),
+            EditorView.theme({
+              '&': {
+                height: '100%',
+                color: '#2d2216',
+                backgroundColor: 'transparent',
+              },
+              '.cm-content': {
+                caretColor: '#8d4519',
+              },
+              '.cm-cursor, .cm-dropCursor': {
+                borderLeftColor: '#8d4519',
+              },
+              '.cm-selectionBackground, .cm-content ::selection': {
+                backgroundColor: 'rgba(173, 92, 43, 0.18)',
+              },
+              '.cm-activeLine': {
+                backgroundColor: 'rgba(173, 92, 43, 0.06)',
+              },
+              '.cm-activeLineGutter': {
+                backgroundColor: 'rgba(173, 92, 43, 0.08)',
+              },
+            }),
+            languageExtension,
+          ],
+        }),
+        parent: editorHost,
+      });
+    }
+
+    function enableFallbackEditor(initialContent, reason) {
+      readOnlyFallback = false;
+      editorHost.style.display = 'none';
+      fallbackEditor.style.display = 'block';
+      fallbackEditor.value = initialContent;
+      fallbackEditor.addEventListener('input', refreshWindowTitle);
+      setStatus(reason, 'neutral');
+    }
+
+    async function ensureEditor(initialContent) {
+      try {
+        await initializeCodeMirror(initialContent);
+        fallbackEditor.style.display = 'none';
+        editorHost.style.display = 'block';
+        setStatus('Editor ready', 'success');
+      } catch (error) {
+        enableFallbackEditor(initialContent, `CodeMirror unavailable, using textarea fallback: ${error.message || error}`);
+      }
+      markClean(initialContent);
+    }
+
+    async function loadFile() {
+      if (!filePath) {
+        setStatus('No file path was provided.', 'error');
+        saveBtn.disabled = true;
+        reloadBtn.disabled = true;
+        return;
+      }
+
+      setStatus('Loading file...');
+      reloadBtn.disabled = true;
+      saveBtn.disabled = true;
+      try {
+        const query = new URLSearchParams({ path: filePath, working_subdir: workingSubdir });
+        const res = await apiFetch(`/api/file-tools/read?${query.toString()}`);
+        const data = await res.json();
+        const content = String(data.content || '');
+        if (editorView) {
+          editorView.dispatch({
+            changes: { from: 0, to: editorView.state.doc.length, insert: content },
+          });
+          markClean(content);
+          setStatus('File reloaded', 'success');
+        } else {
+          await ensureEditor(content);
+        }
+      } catch (error) {
+        setStatus(error.message || 'Could not load file', 'error');
+      } finally {
+        reloadBtn.disabled = false;
+        saveBtn.disabled = false;
+      }
+    }
+
+    async function saveFile() {
+      if (isSaving || !filePath) return;
+      isSaving = true;
+      saveBtn.disabled = true;
+      setStatus('Saving file...');
+      try {
+        const content = currentContent();
+        const res = await apiFetch('/api/file-tools/write', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: filePath,
+            working_subdir: workingSubdir,
+            content,
+          }),
+        });
+        const data = await res.json();
+        markClean(content);
+        setStatus(data.message || 'Saved', 'success');
+      } catch (error) {
+        setStatus(error.message || 'Could not save file', 'error');
+      } finally {
+        isSaving = false;
+        saveBtn.disabled = false;
+      }
+    }
+
+    window.addEventListener('beforeunload', event => {
+      if (!isDirty()) return;
+      event.preventDefault();
+      event.returnValue = '';
+    });
+
+    window.addEventListener('keydown', event => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        saveFile();
+      }
+    });
+
+    saveBtn.addEventListener('click', saveFile);
+    reloadBtn.addEventListener('click', loadFile);
+    closeBtn.addEventListener('click', () => window.close());
+
+    pathLabel.textContent = filePath || 'Unknown file';
+    subdirLabel.textContent = workingSubdir ? `Working subdirectory: ${workingSubdir}` : 'Working from workspace root';
+    refreshWindowTitle();
+    loadFile();
+  </script>
+</body>
+</html>

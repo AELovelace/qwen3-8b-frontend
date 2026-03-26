@@ -11,14 +11,18 @@ Responsibilities:
      ContextVar set by set_request_context().
   4. GmlDocsSearchTool / PsDocsSearchTool query local ChromaDB indices for
      GameMaker and PowerShell documentation.
-  5. Expose MCPToolRegistry and CodeInterpreterWrapper for the streaming loop.
+  5. CodebaseIndexSearchTool / CodebaseFolderOverviewTool query and summarise
+      the workspace codebase index for project-aware assistance.
+  6. Expose MCPToolRegistry and CodeInterpreterWrapper for the streaming loop.
 """
 
 import base64
+import asyncio
 import json
 import logging
 import os
 import queue
+import re
 import shutil
 import subprocess
 import tempfile
@@ -126,6 +130,32 @@ def set_request_context(
     _brave_api_key.set(brave_api_key)
     _ps_session_key.set(ps_session_key)
     _ps_mode.set(ps_mode)
+
+def _run_async_compat(coro):
+    """Run async code from sync tool call contexts.
+
+    Uses asyncio.run when no loop exists in current thread.
+    If a loop exists, runs the coroutine in a short-lived worker thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    payload: dict = {}
+
+    def _worker() -> None:
+        try:
+            payload["value"] = asyncio.run(coro)
+        except Exception as exc:  # pragma: no cover - defensive bridge
+            payload["error"] = exc
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join()
+    if "error" in payload:
+        raise payload["error"]
+    return payload.get("value")
 
 
 def _patch_qwen_code_interpreter_dockerfile() -> None:
@@ -581,8 +611,10 @@ if QWEN_AGENT_AVAILABLE:
                 return "No GML documentation found for that query."
             parts = []
             for i, s in enumerate(snippets, 1):
+                sources = ",".join(s.get("retrieval_sources", []))
+                source_suffix = f" [{sources}]" if sources else ""
                 parts.append(
-                    f"[{i}] {s.get('path', '?')} \u2014 {s.get('heading', '')}\n"
+                    f"[{i}] {s.get('path', '?')} \u2014 {s.get('heading', '')}{source_suffix}\n"
                     f"{s.get('content', '')}"
                 )
             return "\n\n".join(parts)
@@ -610,11 +642,160 @@ if QWEN_AGENT_AVAILABLE:
                 return "No PowerShell documentation found for that query."
             parts = []
             for i, s in enumerate(snippets, 1):
+                sources = ",".join(s.get("retrieval_sources", []))
+                source_suffix = f" [{sources}]" if sources else ""
                 parts.append(
-                    f"[{i}] {s.get('path', '?')} \u2014 {s.get('heading', '')}\n"
+                    f"[{i}] {s.get('path', '?')} \u2014 {s.get('heading', '')}{source_suffix}\n"
                     f"{s.get('content', '')}"
                 )
             return "\n\n".join(parts)
+
+    @register_tool("codebase_index_search")
+    class CodebaseIndexSearchTool(BaseTool):
+        description = (
+            "Search the local workspace codebase index using hybrid retrieval "
+            "(semantic embeddings + ripgrep-like lexical matching). "
+            "Use this to find relevant files, symbols, and implementations."
+        )
+        parameters = [
+            {
+                "name": "query",
+                "type": "string",
+                "description": "What to search for in the codebase (symbol, behavior, pattern, file intent)",
+                "required": True,
+            },
+            {
+                "name": "limit",
+                "type": "integer",
+                "description": "Maximum number of snippets to return (default: 6)",
+                "required": False,
+            },
+            {
+                "name": "folder",
+                "type": "string",
+                "description": "Optional folder prefix filter (e.g. 'src' or 'workspace/tools')",
+                "required": False,
+            },
+        ]
+
+        def call(self, params: Union[str, dict], **kwargs) -> str:
+            from server import rag_search_codebase_docs  # noqa: PLC0415
+
+            p = self._verify_json_format_args(params)
+            query = str(p.get("query") or "").strip()
+            if not query:
+                return "[Error: query is required]"
+
+            ws = kwargs.get("workspace_root") or _workspace_root.get()
+            if not ws:
+                ws = str(Path(__file__).resolve().parent)
+
+            try:
+                limit = int(p.get("limit") or 6)
+            except Exception:
+                limit = 6
+            limit = max(1, min(limit, 20))
+            folder = str(p.get("folder") or "").strip().strip("/")
+
+            try:
+                snippets = _run_async_compat(
+                    rag_search_codebase_docs(query, workspace_root=ws, limit=limit * 2)
+                )
+            except Exception as exc:
+                return f"[Error: codebase index search failed: {exc}]"
+
+            if folder:
+                snippets = [s for s in snippets if str(s.get("path", "")).startswith(folder)]
+            snippets = snippets[:limit]
+
+            if not snippets:
+                return "No codebase matches found for that query."
+
+            parts = []
+            for i, s in enumerate(snippets, 1):
+                sources = ",".join(s.get("retrieval_sources", []))
+                source_suffix = f" [{sources}]" if sources else ""
+                parts.append(
+                    f"[{i}] {s.get('path', '?')} - {s.get('heading', '')}{source_suffix}\n"
+                    f"{s.get('content', '')}"
+                )
+            return "\n\n".join(parts)
+
+    @register_tool("codebase_folder_overview")
+    class CodebaseFolderOverviewTool(BaseTool):
+        description = (
+            "Summarize a folder from the workspace codebase index, including key files and symbol hints. "
+            "Use this when asked to explain a folder or project area."
+        )
+        parameters = [
+            {
+                "name": "folder",
+                "type": "string",
+                "description": "Folder path relative to workspace root (default: '.')",
+                "required": False,
+            },
+            {
+                "name": "max_files",
+                "type": "integer",
+                "description": "Maximum files to list in the overview (default: 25)",
+                "required": False,
+            },
+        ]
+
+        def call(self, params: Union[str, dict], **kwargs) -> str:
+            from server import app, build_codebase_index  # noqa: PLC0415
+
+            p = self._verify_json_format_args(params)
+            folder = str(p.get("folder") or ".").strip().strip("/")
+            try:
+                max_files = int(p.get("max_files") or 25)
+            except Exception:
+                max_files = 25
+            max_files = max(1, min(max_files, 150))
+
+            ws = kwargs.get("workspace_root") or _workspace_root.get()
+            if not ws:
+                ws = str(Path(__file__).resolve().parent)
+            root = str(Path(ws).resolve())
+
+            index = getattr(app.state, "codebase_index", None)
+            if not index or str(index.get("root", "")) != root:
+                index = build_codebase_index(Path(root))
+                app.state.codebase_index = index
+
+            if not index.get("enabled"):
+                return f"Codebase index unavailable for {root}: {index.get('error', 'unknown error')}"
+
+            chunks = index.get("chunks", [])
+            prefix = "" if folder in {"", "."} else folder + "/"
+            paths: dict[str, dict] = {}
+            for chunk in chunks:
+                path = str(chunk.get("path", "") or "")
+                if prefix and not path.startswith(prefix):
+                    continue
+                entry = paths.setdefault(path, {"heading": chunk.get("heading", ""), "symbols": set()})
+                for sym in chunk.get("symbols", [])[:10]:
+                    entry["symbols"].add(sym)
+
+            if not paths:
+                return f"No indexed files found under folder '{folder or '.'}'."
+
+            files_sorted = sorted(paths.keys())
+            shown = files_sorted[:max_files]
+            lines = [
+                f"Codebase folder overview for '{folder or '.'}' (root: {root})",
+                f"Indexed files: {len(files_sorted)}",
+            ]
+            if len(files_sorted) > max_files:
+                lines.append(f"Showing first {max_files} files:")
+
+            for path in shown:
+                heading = str(paths[path].get("heading") or "")
+                symbols = sorted(paths[path].get("symbols", set()))[:6]
+                symbol_text = f" | symbols: {', '.join(symbols)}" if symbols else ""
+                lines.append(f"- {path} | hint: {heading}{symbol_text}")
+
+            return "\n".join(lines)
 
     @register_tool("run_powershell")
     class PowerShellTool(BaseTool):
@@ -675,6 +856,8 @@ if QWEN_AGENT_AVAILABLE:
         CreateDirectoryTool,
         GmlDocsSearchTool,
         PsDocsSearchTool,
+        CodebaseIndexSearchTool,
+        CodebaseFolderOverviewTool,
         PowerShellTool,
     ):
         if isinstance(_tool_cls.parameters, list):
@@ -694,6 +877,8 @@ if QWEN_AGENT_AVAILABLE:
     ]
     _GML_DOCS_TOOL = GmlDocsSearchTool()
     _PS_DOCS_TOOL = PsDocsSearchTool()
+    _CODEBASE_SEARCH_TOOL = CodebaseIndexSearchTool()
+    _CODEBASE_OVERVIEW_TOOL = CodebaseFolderOverviewTool()
     _PS_TOOL = PowerShellTool()
 
     def get_web_search_schema() -> dict:
@@ -707,6 +892,12 @@ if QWEN_AGENT_AVAILABLE:
 
     def get_ps_docs_search_schema() -> dict:
         return tool_to_ollama_schema(_PS_DOCS_TOOL)
+
+    def get_codebase_search_schema() -> dict:
+        return tool_to_ollama_schema(_CODEBASE_SEARCH_TOOL)
+
+    def get_codebase_folder_overview_schema() -> dict:
+        return tool_to_ollama_schema(_CODEBASE_OVERVIEW_TOOL)
 
 else:
     # Graceful fallback stubs when qwen-agent is not importable
@@ -759,6 +950,41 @@ else:
             },
         }
 
+    def get_codebase_search_schema() -> dict:  # type: ignore[misc]
+        return {
+            "type": "function",
+            "function": {
+                "name": "codebase_index_search",
+                "description": "Search the local workspace codebase index.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "limit": {"type": "integer", "description": "Max snippets"},
+                        "folder": {"type": "string", "description": "Optional folder filter"},
+                    },
+                    "required": ["query"],
+                },
+            },
+        }
+
+    def get_codebase_folder_overview_schema() -> dict:  # type: ignore[misc]
+        return {
+            "type": "function",
+            "function": {
+                "name": "codebase_folder_overview",
+                "description": "Summarize folder structure from the codebase index.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "folder": {"type": "string", "description": "Folder path"},
+                        "max_files": {"type": "integer", "description": "Max files to list"},
+                    },
+                    "required": [],
+                },
+            },
+        }
+
     def get_run_powershell_schema() -> dict:  # type: ignore[misc]
         return {
             "type": "function",
@@ -782,6 +1008,33 @@ else:
 
 _ps_sessions: dict[str, "PSSession"] = {}
 _ps_sessions_lock = threading.Lock()
+
+_PS_REMOTE_CMD_RE = re.compile(
+    r"(?i)\b(?:test-connection|invoke-command|enter-pssession|new-pssession|restart-computer)\b"
+)
+_PS_PLACEHOLDER_HOST_RE = re.compile(
+    r"(?i)\b(?:"
+    r"backup-server-name|server-name|computer-name|remote-computer|target-computer|"
+    r"example(?:host|server|computer)?|example\.com|contoso(?:\.com)?|"
+    r"your-(?:server|computer|host)(?:-name)?|<computername>|<hostname>"
+    r")\b"
+)
+
+
+def _validate_powershell_target_placeholders(code: str) -> str | None:
+    """Return an error message when *code* appears to use doc-placeholder targets."""
+    if not code:
+        return None
+    if not _PS_REMOTE_CMD_RE.search(code):
+        return None
+    match = _PS_PLACEHOLDER_HOST_RE.search(code)
+    if not match:
+        return None
+    host = match.group(0)
+    return (
+        "[Error: Placeholder computer name detected in run_powershell input: "
+        f"'{host}'. Replace it with a real resolvable hostname or IP before executing.]"
+    )
 
 
 class PSSession:
@@ -866,6 +1119,10 @@ class PSSession:
         A sentinel line written after the script marks end-of-output.
         """
         import time as _time
+
+        placeholder_error = _validate_powershell_target_placeholders(code)
+        if placeholder_error:
+            return placeholder_error, False
 
         with self._lock:
             if not self.is_alive():
