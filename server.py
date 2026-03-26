@@ -5,6 +5,8 @@ with SQLite memory + FTS5 context retrieval.
 """
 
 import asyncio
+import concurrent.futures
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +20,7 @@ import uuid
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import AsyncGenerator
 from urllib.parse import urlparse
@@ -61,6 +64,17 @@ except ImportError:
     CHROMADB_AVAILABLE = False
     log = logging.getLogger(__name__)  # early reference for error handling
 
+try:
+    from tree_sitter_language_pack import get_parser as ts_get_parser
+    TREESITTER_AVAILABLE = True
+except ImportError:
+    try:
+        from tree_sitter_languages import get_parser as ts_get_parser
+        TREESITTER_AVAILABLE = True
+    except ImportError:
+        TREESITTER_AVAILABLE = False
+        ts_get_parser = None
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -78,6 +92,7 @@ GML_DOCS_ROOT     = INDEXED_DOCS_ROOT / "gml"
 PS_DOCS_ROOT      = INDEXED_DOCS_ROOT / "ps-docs"
 GML_EMBEDDINGS_DB  = Path(__file__).parent / "gml_embeddings"
 PS_EMBEDDINGS_DB   = Path(__file__).parent / "ps_docs_embeddings"
+CODEBASE_EMBEDDINGS_DB = Path(__file__).parent / "codebase_embeddings"
 TOKEN_CAP              = 20_000  # max tokens kept in active context
 FTS_RESULT_LIMIT       = 3       # past-memory snippets to inject when truncated
 TOKEN_ESTIMATE_DIVISOR = 4       # chars / 4 ≈ tokens
@@ -86,13 +101,36 @@ BRAVE_SEARCH_COUNT     = 5       # results to fetch per query
 GML_RESULT_LIMIT       = 4       # local GML snippets to inject
 PS_RESULT_LIMIT        = 4       # local PowerShell snippets to inject
 GML_CHUNK_CHAR_LIMIT   = 1_400   # target chunk size for docs retrieval
+HYBRID_CANDIDATE_MULTIPLIER = 3  # per-retriever candidate pool before fusion
+HYBRID_FUSION_K        = 60.0    # reciprocal-rank-fusion damping constant
+CODEBASE_RESULT_LIMIT  = 6
+CODEBASE_MAX_FILES     = 3_000
+CODEBASE_MAX_FILE_BYTES = 350_000
+CODEBASE_CHUNK_CHAR_LIMIT = 1_600
+CODEBASE_INCLUDE_GLOBS = [
+    "*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.mjs", "*.cjs", "*.json", "*.md",
+    "*.go", "*.rs", "*.java", "*.kt", "*.c", "*.cc", "*.cpp", "*.h", "*.hpp",
+    "*.cs", "*.php", "*.rb", "*.swift", "*.scala", "*.sql", "*.yml", "*.yaml", "*.toml",
+    "*.ini", "*.ps1", "*.psm1", "*.sh", "*.bash", "Dockerfile", "*.ipynb",
+]
+CODEBASE_EXCLUDE_PARTS = {
+    ".git", ".venv", "venv", "node_modules", "dist", "build", "target", "bin",
+    "obj", "coverage", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".idea", ".vscode", "gml_embeddings", "ps_docs_embeddings", "codebase_embeddings",
+}
 JWT_ALGORITHM          = "HS256"
 ACCESS_TOKEN_HOURS     = 24
 
 SEARCH_TAG_RE = re.compile(r'<search>(.*?)</search>', re.IGNORECASE | re.DOTALL)
 GML_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
-TOOL_ERROR_RE = re.compile(r"\[(?:error|permission denied):|\berror\b|\bexception\b", re.IGNORECASE)
+TOOL_ERROR_RE = re.compile(
+    r"^\s*(?:"
+    r"\[(?:error|permission denied|timeout|exception)[:\]]|"
+    r"error\s*:|permission\s+denied|traceback\s*\(|exception\s*:"
+    r")",
+    re.IGNORECASE,
+)
 LITERAL_TOOL_CALL_RE = re.compile(
     r"<\s*function\s*=\s*([a-zA-Z0-9_:\-]+)\s*>(.*?)<\s*/\s*function\s*>",
     re.IGNORECASE | re.DOTALL,
@@ -129,6 +167,8 @@ PS_SYSTEM_PROMPT = (
     "You are assisting with PowerShell scripting and automation. "
     "Prefer accurate PowerShell terminology and explain shell-specific behavior clearly. "
     "Use the ps_docs_search tool whenever authoritative documentation details are needed. "
+    "Treat hostnames and computer names shown in docs/examples as placeholders unless the user provided them; "
+    "do not execute remoting/network commands with placeholder targets and ask for or substitute a real target first. "
     "If retrieved excerpts do not fully answer the question, say what is missing instead of inventing commands, parameters, or behavior."
 )
 
@@ -156,6 +196,15 @@ MCP_FILE_TOOLS_SYSTEM_PROMPT = (
     "When the user asks to list files or directories, call the appropriate directory listing tool and return "
     "the exact entries from the tool output, one per line, without summarizing, grouping, or omitting entries "
     "unless the tool itself reports truncation."
+)
+
+CODEBASE_INDEX_SYSTEM_PROMPT = (
+    "You have access to codebase indexing tools. "
+    "When asked about a folder, project area, architecture, or where functionality lives, "
+    "call codebase_folder_overview first for structure and call codebase_index_search for deeper evidence. "
+    "Ground your answer in returned files/snippets instead of saying you cannot inspect folders. "
+    "When reporting results, explain what files do and include short relevant snippets; "
+    "do not paste raw tool payloads, raw JSON trees, or unprocessed directory dumps unless explicitly requested."
 )
 
 TOOL_EXECUTION_CONTRACT_PROMPT = (
@@ -189,8 +238,8 @@ async def lifespan(app: FastAPI):
         await ensure_conversations_user_column(db)
         await ensure_user_tools_columns(db)
 
-        if not get_jwt_secret():
-            raise RuntimeError("JWT_SECRET is required in environment before startup")
+        # Ensure a signing secret exists (env var preferred, persisted fallback otherwise).
+        get_jwt_secret()
 
         admin = await ensure_bootstrap_admin(db)
         await backfill_legacy_conversations(db, admin["id"])
@@ -199,6 +248,9 @@ async def lifespan(app: FastAPI):
 
     await ensure_gml_index_loaded(force=True)
     await ensure_ps_index_loaded(force=True)
+    app.state.codebase_index = None
+    app.state.codebase_embeddings_ready = False
+    app.state.codebase_embeddings_building = False
     app.state.gml_embeddings_ready = False
     app.state.gml_embeddings_building = CHROMADB_AVAILABLE
     app.state.ps_embeddings_ready = False
@@ -218,13 +270,16 @@ app.mount("/resources", StaticFiles(directory=Path(__file__).parent / "resources
 _ollama_start_lock = asyncio.Lock()
 _gml_index_lock = asyncio.Lock()
 _ps_index_lock = asyncio.Lock()
+_codebase_index_lock = asyncio.Lock()
 _auth_scheme = HTTPBearer(auto_error=False)
 _pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+_jwt_secret_cache: str | None = None
 
 # Embeddings model (lazy-loaded)
 _embedding_model: SentenceTransformerEmbeddingFunction | None = None
 _gml_chroma_client = None  # chromadb.PersistentClient, typed loosely to avoid import quirks
 _ps_chroma_client = None   # chromadb.PersistentClient, typed loosely to avoid import quirks
+_codebase_chroma_client = None  # chromadb.PersistentClient for codebase index
 
 # ---------------------------------------------------------------------------
 # Database
@@ -314,7 +369,33 @@ async def get_db() -> aiosqlite.Connection:
 
 
 def get_jwt_secret() -> str:
-    return os.environ.get("JWT_SECRET", "").strip()
+    global _jwt_secret_cache
+
+    if _jwt_secret_cache:
+        return _jwt_secret_cache
+
+    env_secret = os.environ.get("JWT_SECRET", "").strip()
+    if env_secret:
+        _jwt_secret_cache = env_secret
+        return env_secret
+
+    cfg = load_config()
+    stored_secret = str(cfg.get("jwt_secret", "")).strip() if isinstance(cfg, dict) else ""
+    if stored_secret:
+        _jwt_secret_cache = stored_secret
+        return stored_secret
+
+    generated_secret = secrets.token_urlsafe(48)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg["jwt_secret"] = generated_secret
+    save_config(cfg)
+    _jwt_secret_cache = generated_secret
+    log.warning(
+        "JWT_SECRET not set; generated persistent secret in config.json. "
+        "Set JWT_SECRET in environment to override."
+    )
+    return generated_secret
 
 
 def hash_password(password: str) -> str:
@@ -681,6 +762,29 @@ class AdminGlobalToolingUpdateRequest(BaseModel):
     use_raw_api: bool = True
 
 
+class HybridDocsQueryRequest(BaseModel):
+    query: str
+    source: str = "both"  # "gml" | "ps" | "both"
+    limit: int = CODEBASE_RESULT_LIMIT
+
+
+class CodebaseIndexRebuildRequest(BaseModel):
+    working_subdir: str = ""
+    force: bool = True
+
+
+class CodebaseQueryRequest(BaseModel):
+    query: str
+    limit: int = CODEBASE_RESULT_LIMIT
+    working_subdir: str = ""
+
+
+class FileToolsWriteRequest(BaseModel):
+    path: str
+    content: str
+    working_subdir: str = ""
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -868,6 +972,219 @@ async def ensure_ps_index_loaded(force: bool = False) -> dict:
         return ps_index
 
 
+def _should_include_code_file(path: Path) -> bool:
+    name = path.name
+    return any(fnmatch(name, pattern) for pattern in CODEBASE_INCLUDE_GLOBS)
+
+
+def _chunk_code_content(content: str, limit: int = CODEBASE_CHUNK_CHAR_LIMIT) -> list[str]:
+    compact = (content or "").strip()
+    if not compact:
+        return []
+    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", compact) if part.strip()]
+    if not paragraphs:
+        paragraphs = [compact]
+
+    chunks: list[str] = []
+    current = ""
+    for paragraph in paragraphs:
+        candidate = (current + "\n\n" + paragraph).strip() if current else paragraph
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(paragraph) <= limit:
+            current = paragraph
+            continue
+        start = 0
+        while start < len(paragraph):
+            chunk = paragraph[start:start + limit].strip()
+            if chunk:
+                chunks.append(chunk)
+            start += limit
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _tree_sitter_language_for_path(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    mapping = {
+        ".py": "python",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".go": "go",
+        ".rs": "rust",
+        ".java": "java",
+        ".c": "c",
+        ".h": "c",
+        ".cc": "cpp",
+        ".cpp": "cpp",
+        ".hpp": "cpp",
+        ".cs": "c_sharp",
+        ".rb": "ruby",
+        ".php": "php",
+        ".swift": "swift",
+        ".kt": "kotlin",
+    }
+    return mapping.get(suffix)
+
+
+def _extract_symbols_tree_sitter(path: Path, content: str) -> list[str]:
+    if not TREESITTER_AVAILABLE or not ts_get_parser:
+        return []
+    language = _tree_sitter_language_for_path(path)
+    if not language:
+        return []
+    try:
+        parser = ts_get_parser(language)
+        source_bytes = content.encode("utf-8", errors="ignore")
+        tree = parser.parse(source_bytes)
+    except Exception:
+        return []
+
+    symbols: list[str] = []
+
+    def walk(node) -> None:
+        node_type = str(getattr(node, "type", "") or "")
+        if "identifier" in node_type or node_type in {
+            "function_definition",
+            "function_declaration",
+            "method_definition",
+            "class_definition",
+            "type_identifier",
+        }:
+            start = int(getattr(node, "start_byte", 0) or 0)
+            end = int(getattr(node, "end_byte", 0) or 0)
+            if end > start:
+                text = source_bytes[start:end].decode("utf-8", errors="ignore").strip()
+                text = re.sub(r"\s+", " ", text)
+                if 1 <= len(text) <= 80 and re.match(r"^[A-Za-z_][A-Za-z0-9_:\.\-]*$", text):
+                    symbols.append(text)
+        for child in getattr(node, "children", []) or []:
+            walk(child)
+
+    walk(getattr(tree, "root_node", None))
+    if not symbols:
+        return []
+    return list(dict.fromkeys(symbols))[:80]
+
+
+def _extract_symbols_regex(content: str) -> list[str]:
+    patterns = [
+        r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\b",
+        r"^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(",
+        r"^\s*(?:const|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:async\s*)?\(",
+    ]
+    out: list[str] = []
+    for pattern in patterns:
+        out.extend(re.findall(pattern, content or "", flags=re.MULTILINE))
+    if not out:
+        return []
+    return list(dict.fromkeys(out))[:80]
+
+
+def build_codebase_index(root: Path) -> dict:
+    stats = {
+        "enabled": root.exists() and root.is_dir(),
+        "root": str(root),
+        "file_count": 0,
+        "chunk_count": 0,
+        "indexed_at": now_iso(),
+        "chunks": [],
+        "error": "",
+        "treesitter_enabled": TREESITTER_AVAILABLE,
+    }
+    if not root.exists() or not root.is_dir():
+        stats["error"] = f"Codebase root not found: {root}"
+        return stats
+
+    chunks: list[dict] = []
+    files_seen = 0
+    for file_path in sorted(root.rglob("*")):
+        if files_seen >= CODEBASE_MAX_FILES:
+            break
+        if not file_path.is_file():
+            continue
+        if any(part in CODEBASE_EXCLUDE_PARTS for part in file_path.parts):
+            continue
+        if not _should_include_code_file(file_path):
+            continue
+        try:
+            if file_path.stat().st_size > CODEBASE_MAX_FILE_BYTES:
+                continue
+            raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+
+        files_seen += 1
+        rel_path = file_path.relative_to(root).as_posix()
+        symbols = _extract_symbols_tree_sitter(file_path, raw_text)
+        if not symbols:
+            symbols = _extract_symbols_regex(raw_text)
+        symbol_blob = " ".join(symbols[:50])
+        heading = symbols[0] if symbols else file_path.stem
+
+        for chunk_index, chunk_text in enumerate(_chunk_code_content(raw_text)):
+            searchable = f"{rel_path}\n{heading}\n{symbol_blob}\n{chunk_text}"
+            chunks.append(
+                {
+                    "path": rel_path,
+                    "title": file_path.name,
+                    "heading": heading,
+                    "chunk_index": chunk_index,
+                    "content": chunk_text,
+                    "symbols": symbols,
+                    "searchable": searchable.lower(),
+                    "tokens": Counter(tokenize_search_text(searchable)),
+                }
+            )
+
+        stats["file_count"] += 1
+
+    stats["chunk_count"] = len(chunks)
+    stats["chunks"] = chunks
+    return stats
+
+
+async def ensure_codebase_index_loaded(workspace_root: str, force: bool = False) -> dict:
+    root = Path((workspace_root or "").strip() or Path(__file__).parent).resolve()
+    current_index = getattr(app.state, "codebase_index", None)
+    if (
+        current_index is not None
+        and not force
+        and str(current_index.get("root", "")) == str(root)
+    ):
+        return current_index
+
+    async with _codebase_index_lock:
+        current_index = getattr(app.state, "codebase_index", None)
+        if (
+            current_index is not None
+            and not force
+            and str(current_index.get("root", "")) == str(root)
+        ):
+            return current_index
+
+        codebase_index = await asyncio.to_thread(build_codebase_index, root)
+        app.state.codebase_index = codebase_index
+        app.state.codebase_embeddings_ready = False
+        log.info(
+            "Codebase index ready: root=%s files=%d chunks=%d",
+            root,
+            codebase_index.get("file_count", 0),
+            codebase_index.get("chunk_count", 0),
+        )
+        if codebase_index.get("error"):
+            log.warning("Codebase index warning: %s", codebase_index.get("error"))
+        return codebase_index
+
+
 def get_or_init_embedding_model() -> SentenceTransformerEmbeddingFunction | None:
     global _embedding_model
     if not CHROMADB_AVAILABLE:
@@ -885,7 +1202,7 @@ def get_or_init_embedding_model() -> SentenceTransformerEmbeddingFunction | None
 
 
 def get_or_init_chroma_client(kind: str):
-    global _gml_chroma_client, _ps_chroma_client
+    global _gml_chroma_client, _ps_chroma_client, _codebase_chroma_client
 
     if not CHROMADB_AVAILABLE:
         return None
@@ -911,6 +1228,17 @@ def get_or_init_chroma_client(kind: str):
                 log.error("Failed to initialize PowerShell Chroma client: %s", exc)
                 return None
         return _ps_chroma_client
+
+    if kind == "codebase":
+        if _codebase_chroma_client is None:
+            try:
+                CODEBASE_EMBEDDINGS_DB.mkdir(parents=True, exist_ok=True)
+                _codebase_chroma_client = chromadb.PersistentClient(path=str(CODEBASE_EMBEDDINGS_DB))
+                log.info("Codebase Chroma persistent client initialized at %s", CODEBASE_EMBEDDINGS_DB)
+            except Exception as exc:
+                log.error("Failed to initialize Codebase Chroma client: %s", exc)
+                return None
+        return _codebase_chroma_client
 
     return None
 
@@ -1082,6 +1410,35 @@ async def build_ps_embeddings_collection() -> dict:
     )
 
 
+def _codebase_collection_name(root: str) -> str:
+    root_hash = hashlib.sha1((root or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"codebase_docs_{root_hash}"
+
+
+async def build_codebase_embeddings_collection(codebase_index: dict) -> dict:
+    """Build embeddings for the active codebase index."""
+    if not CHROMADB_AVAILABLE:
+        return {
+            "enabled": False,
+            "error": "chromadb not available; install with: pip install chromadb sentence-transformers",
+            "chunk_count": 0,
+        }
+    if not codebase_index or not codebase_index.get("chunks"):
+        return {
+            "enabled": False,
+            "error": "Codebase index not found; cannot build embeddings",
+            "chunk_count": 0,
+        }
+    root = str(codebase_index.get("root", ""))
+    return await asyncio.to_thread(
+        _chromadb_build_sync,
+        codebase_index["chunks"],
+        collection_name=_codebase_collection_name(root),
+        source_label="Codebase",
+        client_kind="codebase",
+    )
+
+
 def _search_docs(
     query: str,
     *,
@@ -1153,6 +1510,17 @@ def search_ps_docs(query: str, limit: int = PS_RESULT_LIMIT) -> list[dict]:
     )
 
 
+def search_codebase_docs(query: str, root: str, limit: int = CODEBASE_RESULT_LIMIT) -> list[dict]:
+    """Search workspace codebase using vector embeddings (semantic search)."""
+    return _search_docs(
+        query,
+        limit=limit,
+        collection_name=_codebase_collection_name(root),
+        source_label="Codebase",
+        client_kind="codebase",
+    )
+
+
 def _keyword_search_docs(query: str, index: dict, limit: int) -> list[dict]:
     """Keyword fallback retrieval over pre-chunked docs when vector search is unavailable."""
     chunks = index.get("chunks", []) if isinstance(index, dict) else []
@@ -1191,30 +1559,288 @@ def _keyword_search_docs(query: str, index: dict, limit: int) -> list[dict]:
     return selected
 
 
+def _heuristic_search_docs(query: str, index: dict, limit: int) -> list[dict]:
+    """Heuristic lexical retrieval that emphasizes token overlap and path/heading intent."""
+    chunks = index.get("chunks", []) if isinstance(index, dict) else []
+    if not chunks:
+        return []
+
+    query_compact = " ".join((query or "").lower().split())
+    query_tokens = Counter(tokenize_search_text(query))
+    if not query_tokens and not query_compact:
+        return []
+
+    scored: list[tuple[float, dict]] = []
+    for chunk in chunks:
+        chunk_tokens: Counter = chunk.get("tokens", Counter())
+        searchable = str(chunk.get("searchable", "") or "")
+        heading = str(chunk.get("heading", "") or "").lower()
+        title = str(chunk.get("title", "") or "").lower()
+        path = str(chunk.get("path", "") or "").lower()
+
+        score = 0.0
+        overlap = 0
+        for token, qtf in query_tokens.items():
+            ctf = float(chunk_tokens.get(token, 0))
+            if ctf:
+                overlap += 1
+                score += min(ctf, 3.0) * float(qtf)
+                if token in heading:
+                    score += 0.9
+                if token in title:
+                    score += 0.7
+                if token in path:
+                    score += 0.5
+
+        if query_compact:
+            if query_compact in searchable:
+                score += 5.0
+            elif all(token in searchable for token in query_tokens):
+                score += 2.0
+
+        if query_tokens:
+            score += (overlap / max(len(query_tokens), 1)) * 1.5
+
+        if score > 0:
+            scored.append((score, chunk))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = []
+    for score, chunk in scored[:limit]:
+        selected.append(
+            {
+                "score": score,
+                "path": chunk.get("path", ""),
+                "heading": chunk.get("heading", ""),
+                "content": chunk.get("content", ""),
+                "retrieval_sources": ["heuristic"],
+            }
+        )
+    return selected
+
+
+def _ripgrep_like_search_docs(query: str, index: dict, limit: int) -> list[dict]:
+    """Ripgrep-style lexical retrieval over chunk text using regex + token overlap."""
+    chunks = index.get("chunks", []) if isinstance(index, dict) else []
+    if not chunks:
+        return []
+
+    query_text = (query or "").strip()
+    if not query_text:
+        return []
+    query_tokens = Counter(tokenize_search_text(query_text))
+
+    regex = None
+    try:
+        regex = re.compile(query_text, re.IGNORECASE)
+    except re.error:
+        regex = None
+
+    scored: list[tuple[float, dict]] = []
+    for chunk in chunks:
+        searchable = str(chunk.get("searchable", "") or "")
+        content = str(chunk.get("content", "") or "")
+        chunk_tokens: Counter = chunk.get("tokens", Counter())
+
+        score = 0.0
+        if query_text.lower() in searchable:
+            score += 4.0
+        if regex is not None:
+            match_count = len(regex.findall(content))
+            if match_count:
+                score += min(match_count, 6) * 1.3
+
+        for token, qtf in query_tokens.items():
+            ctf = float(chunk_tokens.get(token, 0))
+            if ctf:
+                score += min(ctf, 4.0) * float(qtf)
+
+        if score > 0:
+            scored.append((score, chunk))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected: list[dict] = []
+    for score, chunk in scored[:limit]:
+        selected.append(
+            {
+                "score": score,
+                "path": chunk.get("path", ""),
+                "heading": chunk.get("heading", ""),
+                "content": chunk.get("content", ""),
+                "retrieval_sources": ["ripgrep-like"],
+            }
+        )
+    return selected
+
+
+def _hybrid_merge_retrieval_results(
+    semantic_results: list[dict],
+    heuristic_results: list[dict],
+    limit: int,
+) -> list[dict]:
+    """Fuse parallel retriever outputs into a single ranked list with source attribution."""
+    if not semantic_results and not heuristic_results:
+        return []
+
+    fused: dict[tuple[str, str, str], dict] = {}
+
+    semantic_max = max((max(0.0, float(r.get("score", 0.0))) for r in semantic_results), default=1.0)
+    heuristic_max = max((max(0.0, float(r.get("score", 0.0))) for r in heuristic_results), default=1.0)
+
+    def key_for(item: dict) -> tuple[str, str, str]:
+        content = str(item.get("content", "") or "")
+        return (
+            str(item.get("path", "") or ""),
+            str(item.get("heading", "") or ""),
+            content[:220],
+        )
+
+    def upsert(
+        ranked: list[dict],
+        source: str,
+        score_weight: float,
+        score_max: float,
+    ) -> None:
+        for rank_idx, item in enumerate(ranked, 1):
+            item_key = key_for(item)
+            if item_key not in fused:
+                fused[item_key] = {
+                    "path": item.get("path", ""),
+                    "heading": item.get("heading", ""),
+                    "content": item.get("content", ""),
+                    "score": 0.0,
+                    "retrieval_sources": set(),
+                }
+
+            entry = fused[item_key]
+            entry["retrieval_sources"].add(source)
+            rrf = 1.0 / (HYBRID_FUSION_K + rank_idx)
+            raw_score = max(0.0, float(item.get("score", 0.0)))
+            norm_score = raw_score / score_max if score_max > 0 else 0.0
+            entry["score"] += rrf + (norm_score * score_weight)
+
+    # Slightly favor semantic ranking while still giving lexical retrieval strong influence.
+    upsert(semantic_results, source="semantic", score_weight=0.65, score_max=semantic_max)
+    upsert(heuristic_results, source="heuristic", score_weight=0.35, score_max=heuristic_max)
+
+    merged = list(fused.values())
+    merged.sort(key=lambda x: float(x.get("score", 0.0)), reverse=True)
+    output: list[dict] = []
+    for item in merged[:limit]:
+        output.append(
+            {
+                "score": float(item.get("score", 0.0)),
+                "path": item.get("path", ""),
+                "heading": item.get("heading", ""),
+                "content": item.get("content", ""),
+                "retrieval_sources": sorted(item.get("retrieval_sources", set())),
+            }
+        )
+    return output
+
+
+def _run_hybrid_docs_retrieval(
+    query: str,
+    index: dict,
+    *,
+    semantic_search_fn,
+    lexical_search_fn=_heuristic_search_docs,
+    limit: int,
+) -> list[dict]:
+    """Execute semantic + heuristic retrieval in parallel and fuse their results."""
+    candidate_limit = max(limit * HYBRID_CANDIDATE_MULTIPLIER, limit)
+
+    semantic_results: list[dict] = []
+    heuristic_results: list[dict] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        semantic_future = executor.submit(semantic_search_fn, query, candidate_limit)
+        heuristic_future = executor.submit(lexical_search_fn, query, index, candidate_limit)
+        try:
+            semantic_results = semantic_future.result(timeout=12)
+        except Exception as exc:
+            log.warning("Semantic retriever failed for query=%r: %s", query, exc)
+        try:
+            heuristic_results = heuristic_future.result(timeout=12)
+        except Exception as exc:
+            log.warning("Heuristic retriever failed for query=%r: %s", query, exc)
+
+    return _hybrid_merge_retrieval_results(semantic_results, heuristic_results, limit)
+
+
 def rag_search_gml_docs(query: str, limit: int = GML_RESULT_LIMIT) -> list[dict]:
-    """Hybrid retrieval for GML docs: Chroma semantic first, keyword fallback."""
+    """Hybrid retrieval for GML docs: semantic + heuristic in parallel with rank fusion."""
     gml_index = getattr(app.state, "gml_index", None)
     if gml_index is None:
         gml_index = build_gml_index(GML_DOCS_ROOT, source_label="GML")
         app.state.gml_index = gml_index
 
-    snippets = search_gml_docs(query, limit=limit)
+    snippets = _run_hybrid_docs_retrieval(
+        query,
+        gml_index,
+        semantic_search_fn=search_gml_docs,
+        limit=limit,
+    )
     if snippets:
         return snippets
     return _keyword_search_docs(query, gml_index, limit)
 
 
 def rag_search_ps_docs(query: str, limit: int = PS_RESULT_LIMIT) -> list[dict]:
-    """Hybrid retrieval for PowerShell docs: Chroma semantic first, keyword fallback."""
+    """Hybrid retrieval for PowerShell docs: semantic + heuristic in parallel with rank fusion."""
     ps_index = getattr(app.state, "ps_index", None)
     if ps_index is None:
         ps_index = build_gml_index(PS_DOCS_ROOT, source_label="PowerShell")
         app.state.ps_index = ps_index
 
-    snippets = search_ps_docs(query, limit=limit)
+    snippets = _run_hybrid_docs_retrieval(
+        query,
+        ps_index,
+        semantic_search_fn=search_ps_docs,
+        limit=limit,
+    )
     if snippets:
         return snippets
     return _keyword_search_docs(query, ps_index, limit)
+
+
+async def rag_search_codebase_docs(query: str, workspace_root: str, limit: int = CODEBASE_RESULT_LIMIT) -> list[dict]:
+    """Hybrid retrieval for workspace codebase: semantic + ripgrep-like lexical in parallel."""
+    codebase_index = await ensure_codebase_index_loaded(workspace_root)
+    if not codebase_index.get("chunks"):
+        return []
+
+    if CHROMADB_AVAILABLE and not getattr(app.state, "codebase_embeddings_ready", False):
+        app.state.codebase_embeddings_building = True
+        try:
+            emb_result = await build_codebase_embeddings_collection(codebase_index)
+            app.state.codebase_embeddings_ready = bool(emb_result.get("enabled"))
+        finally:
+            app.state.codebase_embeddings_building = False
+
+    root = str(codebase_index.get("root", ""))
+
+    def _semantic(query_text: str, query_limit: int) -> list[dict]:
+        results = search_codebase_docs(query_text, root=root, limit=query_limit)
+        for item in results:
+            item["retrieval_sources"] = ["semantic"]
+        return results
+
+    hybrid = _run_hybrid_docs_retrieval(
+        query,
+        codebase_index,
+        semantic_search_fn=_semantic,
+        lexical_search_fn=_ripgrep_like_search_docs,
+        limit=limit,
+    )
+    if hybrid:
+        return hybrid
+    return _ripgrep_like_search_docs(query, codebase_index, limit)
 
 
 def format_gml_snippets(snippets: list[dict]) -> str:
@@ -1237,6 +1863,20 @@ def format_ps_snippets(snippets: list[dict]) -> str:
     for index, snippet in enumerate(snippets, 1):
         lines.append(
             f"\n[{index}] {snippet['path']} :: {snippet['heading']}\n{snippet['content']}"
+        )
+    return "\n".join(lines)
+
+
+def format_codebase_snippets(snippets: list[dict]) -> str:
+    lines = [
+        "The following excerpts were retrieved from the current workspace codebase index.",
+        "Use them as grounding context for project-specific APIs, symbols, and file structure.",
+    ]
+    for index, snippet in enumerate(snippets, 1):
+        sources = ",".join(snippet.get("retrieval_sources", []))
+        source_text = f" [{sources}]" if sources else ""
+        lines.append(
+            f"\n[{index}] {snippet.get('path', '')} :: {snippet.get('heading', '')}{source_text}\n{snippet.get('content', '')}"
         )
     return "\n".join(lines)
 
@@ -1510,18 +2150,14 @@ async def build_active_context(db: aiosqlite.Connection, conversation_id: str, n
     return included, truncated
 
 
-async def fts_search(
+async def _fts_search_only(
     db: aiosqlite.Connection,
     conversation_id: str,
     query: str,
     current_user_id: str,
-    limit: int = FTS_RESULT_LIMIT,
-) -> list[str]:
-    """Search messages_fts for snippets relevant to query, excluding current conversation."""
-    # Sanitise FTS query: remove special chars, keep words
-    safe_query = " ".join(
-        word for word in query.split() if word.isalnum() or len(word) > 2
-    )
+    limit: int,
+) -> list[dict]:
+    safe_query = " ".join(word for word in query.split() if word.isalnum() or len(word) > 2)
     if not safe_query:
         return []
     try:
@@ -1529,20 +2165,127 @@ async def fts_search(
             """
             SELECT f.content
             FROM messages_fts f
-                        JOIN conversations c ON c.id = f.conversation_id
+            JOIN conversations c ON c.id = f.conversation_id
             WHERE messages_fts MATCH ?
               AND f.conversation_id != ?
-                            AND c.user_id = ?
+              AND c.user_id = ?
             ORDER BY rank
             LIMIT ?
             """,
-                        (safe_query, conversation_id, current_user_id, limit),
+            (safe_query, conversation_id, current_user_id, limit),
         )
         rows = await cursor.fetchall()
-        return [row["content"] for row in rows]
+        return [
+            {
+                "content": row["content"],
+                "score": float(limit - i),
+                "retrieval_sources": ["fts"],
+            }
+            for i, row in enumerate(rows)
+        ]
     except Exception as exc:
         log.warning("FTS search failed: %s", exc)
         return []
+
+
+async def _lexical_memory_search(
+    conversation_id: str,
+    query: str,
+    current_user_id: str,
+    limit: int,
+) -> list[dict]:
+    query_tokens = Counter(tokenize_search_text(query))
+    if not query_tokens:
+        return []
+    temp_db = await get_db()
+    try:
+        cursor = await temp_db.execute(
+            """
+            SELECT m.content
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE m.conversation_id != ?
+              AND c.user_id = ?
+            ORDER BY m.id DESC
+            LIMIT 600
+            """,
+            (conversation_id, current_user_id),
+        )
+        rows = await cursor.fetchall()
+    except Exception as exc:
+        log.warning("Lexical memory search failed: %s", exc)
+        await temp_db.close()
+        return []
+
+    scored: list[tuple[float, str]] = []
+    for row in rows:
+        content = str(row["content"] or "")
+        tokens = Counter(tokenize_search_text(content))
+        score = 0.0
+        for token, qtf in query_tokens.items():
+            ctf = float(tokens.get(token, 0))
+            if ctf:
+                score += min(ctf, 4.0) * float(qtf)
+        if score > 0:
+            scored.append((score, content))
+
+    await temp_db.close()
+
+    if not scored:
+        return []
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [
+        {
+            "content": content,
+            "score": score,
+            "retrieval_sources": ["lexical"],
+        }
+        for score, content in scored[:limit]
+    ]
+
+
+def _merge_memory_results(fts_results: list[dict], lexical_results: list[dict], limit: int) -> list[str]:
+    if not fts_results and not lexical_results:
+        return []
+    fused: dict[str, dict] = {}
+
+    def ingest(items: list[dict], source: str) -> None:
+        max_score = max((max(0.0, float(i.get("score", 0.0))) for i in items), default=1.0)
+        for rank, item in enumerate(items, 1):
+            content = str(item.get("content", "") or "").strip()
+            if not content:
+                continue
+            entry = fused.setdefault(content, {"score": 0.0, "sources": set()})
+            entry["sources"].add(source)
+            rrf = 1.0 / (HYBRID_FUSION_K + rank)
+            norm = max(0.0, float(item.get("score", 0.0))) / max_score if max_score > 0 else 0.0
+            weight = 0.65 if source == "fts" else 0.35
+            entry["score"] += rrf + (norm * weight)
+
+    ingest(fts_results, "fts")
+    ingest(lexical_results, "lexical")
+
+    ranked = sorted(fused.items(), key=lambda pair: pair[1]["score"], reverse=True)
+    return [content for content, _ in ranked[:limit]]
+
+
+async def fts_search(
+    db: aiosqlite.Connection,
+    conversation_id: str,
+    query: str,
+    current_user_id: str,
+    limit: int = FTS_RESULT_LIMIT,
+) -> list[str]:
+    """Hybrid memory retrieval: FTS + lexical search in parallel, then fused ranking."""
+    fts_task = _fts_search_only(db, conversation_id, query, current_user_id, limit * HYBRID_CANDIDATE_MULTIPLIER)
+    lexical_task = _lexical_memory_search(
+        conversation_id,
+        query,
+        current_user_id,
+        limit * HYBRID_CANDIDATE_MULTIPLIER,
+    )
+    fts_results, lexical_results = await asyncio.gather(fts_task, lexical_task)
+    return _merge_memory_results(fts_results, lexical_results, limit)
 
 
 async def save_messages(
@@ -2315,6 +3058,9 @@ async def get_settings(_: dict = Depends(get_current_user)):
     gml_embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "gml_embeddings_building", False)
     ps_embeddings_enabled = CHROMADB_AVAILABLE and getattr(app.state, "ps_embeddings_ready", False)
     ps_embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "ps_embeddings_building", False)
+    codebase_index = getattr(app.state, "codebase_index", None) or {}
+    codebase_embeddings_enabled = CHROMADB_AVAILABLE and getattr(app.state, "codebase_embeddings_ready", False)
+    codebase_embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "codebase_embeddings_building", False)
 
     return {
         "brave_api_key_set": bool(key),
@@ -2336,6 +3082,16 @@ async def get_settings(_: dict = Depends(get_current_user)):
         "ps_embeddings_enabled": ps_embeddings_enabled,
         "ps_embeddings_building": ps_embeddings_building,
         "ps_embeddings_model": "all-MiniLM-L6-v2" if ps_embeddings_enabled else None,
+        "codebase_index_enabled": bool(codebase_index.get("enabled")),
+        "codebase_index_root": codebase_index.get("root", ""),
+        "codebase_index_file_count": codebase_index.get("file_count", 0),
+        "codebase_index_chunk_count": codebase_index.get("chunk_count", 0),
+        "codebase_indexed_at": codebase_index.get("indexed_at", ""),
+        "codebase_index_error": codebase_index.get("error", ""),
+        "codebase_embeddings_enabled": codebase_embeddings_enabled,
+        "codebase_embeddings_building": codebase_embeddings_building,
+        "codebase_embeddings_model": "all-MiniLM-L6-v2" if codebase_embeddings_enabled else None,
+        "treesitter_enabled": TREESITTER_AVAILABLE,
     }
 
 
@@ -2433,6 +3189,128 @@ async def update_settings(body: SettingsUpdate, _: dict = Depends(get_current_us
     return {"ok": True}
 
 
+@app.post("/api/retrieval/docs/query")
+async def hybrid_docs_query(body: HybridDocsQueryRequest, _: dict = Depends(get_current_user)):
+    query = (body.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+
+    source = (body.source or "both").strip().lower()
+    if source not in {"gml", "ps", "both"}:
+        raise HTTPException(status_code=400, detail="source must be one of: gml, ps, both")
+    limit = max(1, min(int(body.limit or CODEBASE_RESULT_LIMIT), 20))
+
+    gml_results: list[dict] = []
+    ps_results: list[dict] = []
+    if source in {"gml", "both"}:
+        gml_results = rag_search_gml_docs(query, limit=limit)
+    if source in {"ps", "both"}:
+        ps_results = rag_search_ps_docs(query, limit=limit)
+
+    combined = gml_results + ps_results
+    return {
+        "query": query,
+        "source": source,
+        "limit": limit,
+        "gml_result_count": len(gml_results),
+        "ps_result_count": len(ps_results),
+        "result_count": len(combined),
+        "results": combined,
+    }
+
+
+@app.get("/api/retrieval/diagnostics")
+async def retrieval_diagnostics(current_user: dict = Depends(get_current_user)):
+    gml_index = await ensure_gml_index_loaded()
+    ps_index = await ensure_ps_index_loaded()
+    codebase_index = getattr(app.state, "codebase_index", None) or {}
+    effective_workspace_root = resolve_effective_workspace_root(
+        current_user.get("workspace_root", ""),
+        "",
+    )
+    return {
+        "chromadb_available": CHROMADB_AVAILABLE,
+        "treesitter_available": TREESITTER_AVAILABLE,
+        "hybrid_candidate_multiplier": HYBRID_CANDIDATE_MULTIPLIER,
+        "hybrid_fusion_k": HYBRID_FUSION_K,
+        "gml": {
+            "enabled": bool(gml_index.get("enabled")),
+            "file_count": gml_index.get("file_count", 0),
+            "chunk_count": gml_index.get("chunk_count", 0),
+            "embeddings_ready": bool(getattr(app.state, "gml_embeddings_ready", False)),
+            "embeddings_building": bool(getattr(app.state, "gml_embeddings_building", False)),
+            "error": gml_index.get("error", ""),
+        },
+        "ps": {
+            "enabled": bool(ps_index.get("enabled")),
+            "file_count": ps_index.get("file_count", 0),
+            "chunk_count": ps_index.get("chunk_count", 0),
+            "embeddings_ready": bool(getattr(app.state, "ps_embeddings_ready", False)),
+            "embeddings_building": bool(getattr(app.state, "ps_embeddings_building", False)),
+            "error": ps_index.get("error", ""),
+        },
+        "codebase": {
+            "configured_workspace_root": current_user.get("workspace_root", ""),
+            "effective_workspace_root": effective_workspace_root,
+            "enabled": bool(codebase_index.get("enabled")),
+            "root": codebase_index.get("root", ""),
+            "file_count": codebase_index.get("file_count", 0),
+            "chunk_count": codebase_index.get("chunk_count", 0),
+            "embeddings_ready": bool(getattr(app.state, "codebase_embeddings_ready", False)),
+            "embeddings_building": bool(getattr(app.state, "codebase_embeddings_building", False)),
+            "error": codebase_index.get("error", ""),
+        },
+    }
+
+
+@app.post("/api/codebase/index/rebuild")
+async def rebuild_codebase_index(body: CodebaseIndexRebuildRequest, current_user: dict = Depends(get_current_user)):
+    base_root = current_user.get("workspace_root", "")
+    effective_root = resolve_effective_workspace_root(base_root, body.working_subdir)
+    if not effective_root:
+        effective_root = str(Path(__file__).parent.resolve())
+
+    codebase_index = await ensure_codebase_index_loaded(effective_root, force=bool(body.force))
+    app.state.codebase_embeddings_building = True
+    try:
+        emb_result = await build_codebase_embeddings_collection(codebase_index)
+        app.state.codebase_embeddings_ready = bool(emb_result.get("enabled"))
+    finally:
+        app.state.codebase_embeddings_building = False
+
+    return {
+        "ok": True,
+        "root": codebase_index.get("root", ""),
+        "file_count": codebase_index.get("file_count", 0),
+        "chunk_count": codebase_index.get("chunk_count", 0),
+        "treesitter_enabled": TREESITTER_AVAILABLE,
+        "embeddings_enabled": bool(getattr(app.state, "codebase_embeddings_ready", False)),
+        "error": codebase_index.get("error", ""),
+    }
+
+
+@app.post("/api/codebase/query")
+async def query_codebase_index(body: CodebaseQueryRequest, current_user: dict = Depends(get_current_user)):
+    query = (body.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    limit = max(1, min(int(body.limit or CODEBASE_RESULT_LIMIT), 20))
+
+    base_root = current_user.get("workspace_root", "")
+    effective_root = resolve_effective_workspace_root(base_root, body.working_subdir)
+    if not effective_root:
+        effective_root = str(Path(__file__).parent.resolve())
+
+    results = await rag_search_codebase_docs(query, workspace_root=effective_root, limit=limit)
+    return {
+        "query": query,
+        "limit": limit,
+        "workspace_root": effective_root,
+        "result_count": len(results),
+        "results": results,
+    }
+
+
 @app.get("/api/file-tools/list")
 async def file_tools_list(
     path: str = Query("."),
@@ -2471,6 +3349,68 @@ async def file_tools_list(
             "working_subdir": normalized_subdir,
             "cwd": current_rel,
             "entries": entries,
+        }
+    except FileToolError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.get("/api/file-tools/read")
+async def file_tools_read(
+    path: str = Query(...),
+    working_subdir: str = Query(""),
+    current_user: dict = Depends(get_current_user),
+):
+    if not bool(current_user.get("file_tools_enabled")):
+        raise HTTPException(status_code=403, detail="File tools are disabled for this account")
+
+    base_root = (current_user.get("workspace_root") or "").strip()
+    if not base_root:
+        raise HTTPException(status_code=400, detail="Workspace root is not configured by admin")
+
+    try:
+        effective_root = resolve_effective_workspace_root(base_root, working_subdir)
+        target = resolve_sandboxed_path(effective_root, path)
+        if not target.is_file():
+            raise HTTPException(status_code=400, detail=f"Not a file or does not exist: {path}")
+
+        content = ft_read_file(effective_root, path)
+        stat = target.stat()
+        return {
+            "path": path,
+            "working_subdir": working_subdir,
+            "content": content,
+            "byte_length": len(content.encode("utf-8")),
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        }
+    except FileToolError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.post("/api/file-tools/write")
+async def file_tools_write(body: FileToolsWriteRequest, current_user: dict = Depends(get_current_user)):
+    if not bool(current_user.get("file_tools_enabled")):
+        raise HTTPException(status_code=403, detail="File tools are disabled for this account")
+
+    base_root = (current_user.get("workspace_root") or "").strip()
+    if not base_root:
+        raise HTTPException(status_code=400, detail="Workspace root is not configured by admin")
+
+    try:
+        effective_root = resolve_effective_workspace_root(base_root, body.working_subdir)
+        result = ft_write_file(effective_root, body.path, body.content)
+        target = resolve_sandboxed_path(effective_root, body.path)
+        stat = target.stat()
+        return {
+            "ok": True,
+            "path": body.path,
+            "working_subdir": body.working_subdir,
+            "message": result,
+            "byte_length": len(body.content.encode("utf-8")),
+            "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
         }
     except FileToolError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2541,6 +3481,23 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             if fts_snippets:
                 log.info("Injecting %d FTS snippet(s) for conv %s", len(fts_snippets), req.conversation_id)
 
+        codebase_snippets: list[dict] = []
+        if effective_workspace_root and (use_file_tools or use_mcp_tools):
+            try:
+                codebase_snippets = await rag_search_codebase_docs(
+                    req.message,
+                    workspace_root=effective_workspace_root,
+                    limit=4,
+                )
+                if codebase_snippets:
+                    log.info(
+                        "Injecting %d codebase snippet(s) from %s",
+                        len(codebase_snippets),
+                        effective_workspace_root,
+                    )
+            except Exception as exc:
+                log.warning("Codebase retrieval skipped due to error: %s", exc)
+
         # Build base message list
         ollama_messages: list[dict] = []
         system_prompt_parts: list[str] = []
@@ -2566,6 +3523,16 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             else:
                 system_prompt_parts.append(FILE_TOOLS_SYSTEM_PROMPT)
 
+        if use_file_tools or use_mcp_tools:
+            system_prompt_parts.append(CODEBASE_INDEX_SYSTEM_PROMPT)
+            if effective_workspace_root:
+                working_subdir = (req.working_subdir or "").strip() or "."
+                system_prompt_parts.append(
+                    "Current working directory for this request: "
+                    f"{effective_workspace_root} (subdir: {working_subdir}). "
+                    "Treat this as the default root for relative paths and folder exploration."
+                )
+
         # Enforce stronger compliance when any tool/MCP path is enabled.
         if use_any_tooling:
             system_prompt_parts.append(TOOL_EXECUTION_CONTRACT_PROMPT)
@@ -2578,6 +3545,9 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 "(earlier conversations outside the active context window). "
                 "Use them if relevant:\n\n" + snippets_text
             )
+
+        if codebase_snippets:
+            system_prompt_parts.append(format_codebase_snippets(codebase_snippets))
 
         if system_prompt_parts:
             ollama_messages.append({
@@ -2636,6 +3606,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
         file_content_writes = 0
         gml_snippet_count = 0
         ps_snippet_count = 0
+        codebase_snippet_count = len(codebase_snippets)
         seen_tool_call_ids: set[str] = set()
         working_msgs = list(ollama_messages)
 
@@ -2688,6 +3659,10 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 tools.append("gml_docs_search")
             if use_ps_docs:
                 tools.append("ps_docs_search")
+            # Codebase index tools — local hybrid retrieval over workspace files
+            if use_file_tools or use_mcp_tools:
+                tools.append("codebase_folder_overview")
+                tools.append("codebase_index_search")
             # Code interpreter — always local (Docker sandbox, no MCP equivalent)
             if use_code_interpreter and code_interpreter.is_available():
                 tools.append("code_interpreter")
@@ -2699,11 +3674,11 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 try:
                     user_mcp_config = _load_user_mcp_config(
                         current_user.get("mcp_config", ""),
-                        current_user.get("workspace_root", ""),
+                        effective_workspace_root,
                     )
                     resolved_mcp_config = _resolve_and_validate_user_mcp_config(
                         user_mcp_config,
-                        current_user.get("workspace_root", ""),
+                        effective_workspace_root,
                     )
                     if resolved_mcp_config.get("mcpServers"):
                         log.info(
@@ -2810,6 +3785,43 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 else:
                     labels.append(type(tool_item).__name__)
             return labels
+
+        def _compact_tool_summary(tool_name: str, tool_content: str, tool_ok: bool) -> str:
+            """Produce concise, user-facing tool status text to avoid dumping raw payloads."""
+            name = str(tool_name or "")
+            content = str(tool_content or "")
+            lowered_name = name.lower()
+
+            # MCP filesystem tools often return very large JSON payloads.
+            if lowered_name in {
+                "filesystem-list_directory",
+                "filesystem-directory_tree",
+                "filesystem-read_file",
+                "filesystem-search_files",
+                "list_dir",
+                "read_file",
+                "search_files",
+                "grep_search",
+            }:
+                if not tool_ok:
+                    return f"{name} failed"
+                if lowered_name.endswith("list_directory") or lowered_name == "list_dir":
+                    return "Directory listing retrieved"
+                if lowered_name.endswith("directory_tree"):
+                    return "Directory tree retrieved"
+                if lowered_name.endswith("read_file") or lowered_name == "read_file":
+                    return "File content retrieved"
+                if lowered_name.endswith("search_files") or lowered_name == "search_files":
+                    return "File search results retrieved"
+                if lowered_name == "grep_search":
+                    return "Text search results retrieved"
+
+            compact = re.sub(r"\s+", " ", content).strip()
+            if not compact:
+                return "ok" if tool_ok else "error"
+            if len(compact) > 180:
+                return compact[:180] + "..."
+            return compact
 
         def _make_agent(include_mcp_tools: bool):
             function_list = _build_agent_function_list(include_mcp_tools=include_mcp_tools)
@@ -3025,7 +4037,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                                         tool_preview,
                                     )
                                 tool_ok = not bool(TOOL_ERROR_RE.search(tool_content))
-                                tool_summary = tool_preview if tool_preview else ("ok" if tool_ok else "error")
+                                tool_summary = _compact_tool_summary(tool_name, tool_content, tool_ok)
                                 yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': tool_ok, 'summary': tool_summary})}\n\n"
                                 emitted_output = True
                                 tools_called += 1
@@ -3089,6 +4101,16 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     fallback_delta = "\n\n" + tool_result
                     yield f"data: {json.dumps({'type': 'content', 'delta': fallback_delta})}\n\n"
                     token_count = estimate_tokens(final_content + all_thinking)
+                else:
+                    cleaned = _strip_literal_tool_markup(final_content)
+                    if cleaned != final_content:
+                        final_content = cleaned
+                        yield f"data: {json.dumps({'type': 'content_replace', 'content': final_content})}\n\n"
+                    summary = (
+                        f"Protocol mismatch: model emitted literal markup for '{tool_name}' "
+                        "instead of native tool_calls."
+                    )
+                    yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': False, 'summary': summary})}\n\n"
             final_content_preview = re.sub(r"\s+", " ", final_content).strip()[:400]
             final_thinking_preview = re.sub(r"\s+", " ", all_thinking).strip()[:250]
             log.info("chat[%s] final_content=%r", stream_id, final_content_preview)
@@ -3104,7 +4126,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 file_reads,
                 file_writes,
             )
-            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'searches_done': searches_done, 'commands_run': code_runs, 'code_runs': code_runs, 'powershell_runs': powershell_runs, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': gml_snippet_count > 0, 'gml_snippet_count': gml_snippet_count, 'ps_docs_used': ps_snippet_count > 0, 'ps_docs_snippet_count': ps_snippet_count})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'searches_done': searches_done, 'commands_run': code_runs, 'code_runs': code_runs, 'powershell_runs': powershell_runs, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': gml_snippet_count > 0, 'gml_snippet_count': gml_snippet_count, 'ps_docs_used': ps_snippet_count > 0, 'ps_docs_snippet_count': ps_snippet_count, 'codebase_used': codebase_snippet_count > 0, 'codebase_snippet_count': codebase_snippet_count})}\n\n"
         except Exception as exc:
             log.exception("chat[%s] streaming error", stream_id)
             error_text = str(exc)
