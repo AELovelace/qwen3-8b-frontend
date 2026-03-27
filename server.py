@@ -4234,12 +4234,32 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
+
+    # Auto-reload is disabled by default because ChromaDB/SQLite embedding files
+    # live inside the project tree and trigger constant reloads, crashing the server.
+    # Set UVICORN_RELOAD=1 to re-enable hot reload during front-end-only development.
+    _reload = (os.getenv("UVICORN_RELOAD", "0") or "0").strip().lower() in {"1", "true", "yes", "on"}
+
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
         port=42069,
-        reload=True,
+        reload=_reload,
         reload_excludes=[
+            # Embedding vector databases (ChromaDB writes these constantly)
+            "gml_embeddings/*",
+            "gml_embeddings/**",
+            "ps_docs_embeddings/*",
+            "ps_docs_embeddings/**",
+            "codebase_embeddings/*",
+            "codebase_embeddings/**",
+            "workspace_embeddings/*",
+            "workspace_embeddings/**",
+            # SQLite WAL/SHM journal files (written on every DB transaction)
+            "**/*.sqlite3",
+            "**/*.sqlite3-wal",
+            "**/*.sqlite3-shm",
+            # Code-interpreter kernel temp files
             "workspace/tools/code_interpreter/*",
             "workspace/tools/code_interpreter/**",
             "**/launch_kernel_*.py",
