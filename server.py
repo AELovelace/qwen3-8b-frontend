@@ -96,6 +96,8 @@ CODEBASE_EMBEDDINGS_DB = Path(__file__).parent / "codebase_embeddings"
 TOKEN_CAP              = 20_000  # max tokens kept in active context
 FTS_RESULT_LIMIT       = 3       # past-memory snippets to inject when truncated
 TOKEN_ESTIMATE_DIVISOR = 4       # chars / 4 ≈ tokens
+EDITOR_CONTEXT_CHAR_LIMIT = 12_000
+EDITOR_SELECTION_CHAR_LIMIT = 4_000
 MAX_SEARCH_ITERATIONS  = 3       # max Brave searches per response
 BRAVE_SEARCH_COUNT     = 5       # results to fetch per query
 GML_RESULT_LIMIT       = 4       # local GML snippets to inject
@@ -210,6 +212,11 @@ CODEBASE_INDEX_SYSTEM_PROMPT = (
 TOOL_EXECUTION_CONTRACT_PROMPT = (
     "Execution-first contract for tool and MCP calls: "
     "If the user request is concrete and executable, do the work first and do not ask clarifying questions. "
+    "CRITICAL: When a tool call is needed, make the tool call immediately as your first action — "
+    "do NOT output any text, acknowledgment, plan, or preamble before the tool call. "
+    "Do not write 'I'll examine...', 'I will check...', 'Let me look...', or any similar planning text before calling a tool. "
+    "When a request combines a tool action with follow-up analysis (e.g., 'list files and describe oddities'), "
+    "call the required tool(s) first, then synthesize results in your text response afterward. "
     "Never replace requested output with a high-level summary unless explicitly asked. "
     "Never stop early due to response length; if output is large, split into batches and continue until complete. "
     "Ask follow-up questions only for true blockers such as missing path, permission denied, unavailable command, or contradictory constraints. "
@@ -712,6 +719,7 @@ class ChatRequest(BaseModel):
     conversation_id: str
     message: str
     model: str = DEFAULT_MODEL
+    surface: str = "main"
     think: bool = True
     use_search: bool = True
     use_gml_docs: bool = True
@@ -721,6 +729,13 @@ class ChatRequest(BaseModel):
     use_powershell: bool = False  # Persistent PowerShell session (native or Docker)
     use_mcp_tools: bool = True  # Include initialised MCP server tools
     working_subdir: str = ""
+    current_file_path: str = ""
+    current_file_language: str = ""
+    current_file_content: str = ""
+    current_file_selection: str = ""
+    current_file_cursor_line: int = 0
+    current_file_cursor_column: int = 0
+    current_file_is_dirty: bool = False
 
 
 class SettingsUpdate(BaseModel):
@@ -810,6 +825,57 @@ def normalize_model_name(model: str) -> str:
     }:
         return DEFAULT_MODEL
     return cleaned
+
+
+def _clip_editor_context(text: str, limit: int) -> tuple[str, bool]:
+    compact = str(text or "")
+    if len(compact) <= limit:
+        return compact, False
+    omitted = len(compact) - limit
+    return compact[:limit].rstrip() + f"\n\n[... truncated {omitted} characters ...]", True
+
+
+def build_editor_context_prompt(req: ChatRequest) -> str:
+    file_path = (req.current_file_path or "").strip()
+    if not file_path:
+        return ""
+
+    parts = [
+        "You are operating from an editor side panel attached to the current file.",
+        f"Focused file: {file_path}",
+    ]
+
+    language = (req.current_file_language or "").strip()
+    if language:
+        parts.append(f"Language: {language}")
+
+    if req.current_file_cursor_line > 0:
+        parts.append(
+            "Cursor: "
+            f"line {req.current_file_cursor_line}, column {max(1, req.current_file_cursor_column)}"
+        )
+
+    parts.append(f"Buffer state: {'unsaved changes present' if req.current_file_is_dirty else 'matches saved content'}")
+
+    selection = (req.current_file_selection or "").strip()
+    if selection:
+        clipped_selection, selection_truncated = _clip_editor_context(
+            selection,
+            EDITOR_SELECTION_CHAR_LIMIT,
+        )
+        selection_note = "Selection (truncated):" if selection_truncated else "Selection:"
+        parts.append(f"{selection_note}\n{clipped_selection}")
+
+    content = (req.current_file_content or "").strip()
+    if content:
+        clipped_content, content_truncated = _clip_editor_context(content, EDITOR_CONTEXT_CHAR_LIMIT)
+        content_label = "Current buffer excerpt (truncated):" if content_truncated else "Current buffer:"
+        parts.append(f"{content_label}\n{clipped_content}")
+
+    parts.append(
+        "When proposing edits or analysis, prioritize this focused file context before exploring other files."
+    )
+    return "\n\n".join(parts)
 
 
 def tokenize_search_text(text: str) -> list[str]:
@@ -3533,6 +3599,10 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     "Treat this as the default root for relative paths and folder exploration."
                 )
 
+        editor_context_prompt = build_editor_context_prompt(req)
+        if editor_context_prompt:
+            system_prompt_parts.append(editor_context_prompt)
+
         # Enforce stronger compliance when any tool/MCP path is enabled.
         if use_any_tooling:
             system_prompt_parts.append(TOOL_EXECUTION_CONTRACT_PROMPT)
@@ -3579,10 +3649,11 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             ps_mode=ps_mode if use_powershell else "off",
         )
         log.info(
-            "chat[%s] start user=%s conv=%s model=%s toggles={search:%s,gml:%s,ps:%s,file:%s,code:%s,ps_exec:%s,mcp:%s} workspace=%s",
+            "chat[%s] start user=%s conv=%s surface=%s model=%s toggles={search:%s,gml:%s,ps:%s,file:%s,code:%s,ps_exec:%s,mcp:%s} workspace=%s file=%s",
             stream_id,
             current_user.get("id"),
             req.conversation_id,
+            req.surface,
             requested_model,
             req.use_search,
             use_gml_docs,
@@ -3592,6 +3663,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             use_powershell,
             use_mcp_tools,
             effective_workspace_root,
+            (req.current_file_path or "").strip() or "-",
         )
         log.info("chat[%s] user_message=%r", stream_id, user_message_preview)
 
