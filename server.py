@@ -82,8 +82,12 @@ OLLAMA_BASE_URL   = os.getenv("OLLAMA_BASE_URL", "http://100.66.64.45:11434").rs
 OLLAMA_URL        = f"{OLLAMA_BASE_URL}/api/chat"
 OLLAMA_HEALTH_URL = f"{OLLAMA_BASE_URL}/api/tags"
 OLLAMA_OPENAI_URL = f"{OLLAMA_BASE_URL}/v1"
+OLLAMA_AGENTIC_BASE_URL = os.getenv("OLLAMA_AGENTIC_BASE_URL", "http://100.66.64.45:11435").rstrip("/")
+OLLAMA_AGENTIC_URL = f"{OLLAMA_AGENTIC_BASE_URL}/api/chat"
+OLLAMA_AGENTIC_HEALTH_URL = f"{OLLAMA_AGENTIC_BASE_URL}/api/tags"
 BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
 DEFAULT_MODEL     = "qwen3-coder:30b"
+DEFAULT_AGENTIC_MODEL = "qwen3:8b"
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
 CONFIG_PATH       = Path(__file__).parent / "config.json"
@@ -719,6 +723,7 @@ class ChatRequest(BaseModel):
     conversation_id: str
     message: str
     model: str = DEFAULT_MODEL
+    agentic_model: str = DEFAULT_AGENTIC_MODEL  # Used for background tool execution on 11435
     surface: str = "main"
     think: bool = True
     use_search: bool = True
@@ -775,6 +780,9 @@ class AdminGlobalToolingUpdateRequest(BaseModel):
     use_powershell: str = "off"  # "off" | "native" | "docker"
     use_mcp_tools: bool = True
     use_raw_api: bool = True
+    agentic_endpoint_url: str = OLLAMA_AGENTIC_BASE_URL  # Routing: background tooling endpoint (11435)
+    agentic_model: str = DEFAULT_AGENTIC_MODEL  # Model for background tool execution
+    agentic_policy: str = "all_tooling"  # "all_tooling" | "heavy_only" (which tools trigger background stage)
 
 
 class HybridDocsQueryRequest(BaseModel):
@@ -2004,6 +2012,65 @@ def save_global_tool_toggles(toggles: dict) -> None:
     save_config(cfg)
 
 
+async def is_ollama_endpoint_running(health_url: str, timeout_seconds: float = 1.5) -> bool:
+    """Return True when an Ollama endpoint responds to /api/tags (generic health check)."""
+    try:
+        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(health_url) as resp:
+                return resp.status == 200
+    except Exception:
+        return False
+
+
+def get_model_routing_config() -> dict:
+    """Load model routing config from config.json with defaults for dual-endpoint setup."""
+    cfg = load_config()
+    saved = cfg.get("model_routing", {}) if isinstance(cfg, dict) else {}
+    
+    endpoint_url = str(saved.get("agentic_endpoint_url", OLLAMA_AGENTIC_BASE_URL)).strip()
+    if not endpoint_url:
+        endpoint_url = OLLAMA_AGENTIC_BASE_URL
+    
+    model = str(saved.get("agentic_model", DEFAULT_AGENTIC_MODEL)).strip()
+    if not model:
+        model = DEFAULT_AGENTIC_MODEL
+    
+    policy = str(saved.get("agentic_policy", "all_tooling")).strip()
+    if policy not in ("all_tooling", "heavy_only"):
+        policy = "all_tooling"
+    
+    return {
+        "agentic_endpoint_url": endpoint_url,
+        "agentic_model": model,
+        "agentic_policy": policy,
+    }
+
+
+def save_model_routing_config(routing: dict) -> None:
+    """Persist model routing config to config.json."""
+    cfg = load_config()
+    
+    endpoint_url = str(routing.get("agentic_endpoint_url", OLLAMA_AGENTIC_BASE_URL)).strip()
+    if not endpoint_url:
+        endpoint_url = OLLAMA_AGENTIC_BASE_URL
+    
+    model = str(routing.get("agentic_model", DEFAULT_AGENTIC_MODEL)).strip()
+    if not model:
+        model = DEFAULT_AGENTIC_MODEL
+    
+    policy = str(routing.get("agentic_policy", "all_tooling")).strip()
+    if policy not in ("all_tooling", "heavy_only"):
+        policy = "all_tooling"
+    
+    cfg["model_routing"] = {
+        "agentic_endpoint_url": endpoint_url,
+        "agentic_model": model,
+        "agentic_policy": policy,
+    }
+    save_config(cfg)
+
+
 def _default_user_mcp_config(workspace_root: str) -> dict:
     cfg = {
         "mcpServers": {
@@ -3001,7 +3068,9 @@ async def admin_update_persona(
 
 @app.get("/api/admin/global-tooling")
 async def get_admin_global_tooling(_: dict = Depends(require_admin)):
-    return get_global_tool_toggles()
+    tooling = get_global_tool_toggles()
+    routing = get_model_routing_config()
+    return {**tooling, **routing}
 
 
 @app.post("/api/admin/global-tooling")
@@ -3019,7 +3088,20 @@ async def update_admin_global_tooling(
         "use_raw_api": True,
     }
     save_global_tool_toggles(payload)
-    return {"ok": True, **payload}
+    
+    # Save routing config for dual-endpoint setup
+    routing_payload = {
+        "agentic_endpoint_url": body.agentic_endpoint_url,
+        "agentic_model": body.agentic_model,
+        "agentic_policy": body.agentic_policy,
+    }
+    save_model_routing_config(routing_payload)
+    
+    return {
+        "ok": True,
+        **payload,
+        **routing_payload,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3127,11 +3209,21 @@ async def get_settings(_: dict = Depends(get_current_user)):
     codebase_index = getattr(app.state, "codebase_index", None) or {}
     codebase_embeddings_enabled = CHROMADB_AVAILABLE and getattr(app.state, "codebase_embeddings_ready", False)
     codebase_embeddings_building = CHROMADB_AVAILABLE and getattr(app.state, "codebase_embeddings_building", False)
+    
+    # Check dual-endpoint routing health
+    chat_endpoint_online = await is_ollama_running(OLLAMA_HEALTH_URL)
+    agentic_endpoint_online = await is_ollama_endpoint_running(OLLAMA_AGENTIC_HEALTH_URL)
+    routing_config = get_model_routing_config()
 
     return {
         "brave_api_key_set": bool(key),
         "brave_api_key_masked": masked,
         "global_tool_toggles": get_global_tool_toggles(),
+        "model_routing": routing_config,
+        "chat_endpoint_url": OLLAMA_BASE_URL,
+        "chat_endpoint_online": chat_endpoint_online,
+        "agentic_endpoint_url": routing_config.get("agentic_endpoint_url", OLLAMA_AGENTIC_BASE_URL),
+        "agentic_endpoint_online": agentic_endpoint_online,
         "gml_docs_enabled": bool(gml_index.get("enabled")),
         "gml_docs_file_count": gml_index.get("file_count", 0),
         "gml_docs_chunk_count": gml_index.get("chunk_count", 0),
@@ -3960,6 +4052,138 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     raise
 
             retry_without_mcp_on_eof = bool(use_mcp_tools and include_mcp_for_run)
+
+            # Two-stage pipeline: background reasoning + tool execution on agentic endpoint (11435)
+            # Strategy: detect heavy tooling, evaluate routing policy, conditionally run worker stage
+            heavy_tooling_requested = any([
+                use_file_tools,
+                use_code_interpreter,
+                use_powershell,
+                use_mcp_tools,
+            ])
+            routing_config = get_model_routing_config()
+            agentic_policy = routing_config.get("agentic_policy", "all_tooling")
+            agentic_endpoint_base_url = routing_config.get("agentic_endpoint_url", OLLAMA_AGENTIC_BASE_URL).rstrip("/")
+            agentic_endpoint_model = routing_config.get("agentic_model", DEFAULT_AGENTIC_MODEL)
+            agentic_health_url = f"{agentic_endpoint_base_url}/api/tags"
+
+            # Determine if background stage should run
+            run_background_stage = (
+                heavy_tooling_requested
+                and agentic_policy == "all_tooling"
+                and await is_ollama_endpoint_running(agentic_health_url)
+            )
+
+            if run_background_stage:
+                log.info(
+                    "chat[%s] triggering background stage: heavy_tooling=%s policy=%s endpoint=%s model=%s",
+                    stream_id,
+                    heavy_tooling_requested,
+                    agentic_policy,
+                    agentic_endpoint_base_url,
+                    agentic_endpoint_model,
+                )
+                try:
+                    # Build worker agent for background stage (no web search, no MCP to keep it lean)
+                    worker_llm_cfg = {
+                        "model": agentic_endpoint_model,
+                        "model_server": f"{agentic_endpoint_base_url}/v1",
+                        "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
+                        "generate_cfg": {
+                            "use_raw_api": use_raw_api,
+                            "extra_body": {"think": True},
+                        },
+                    }
+                    worker_agent = Assistant(
+                        function_list=_build_agent_function_list(include_mcp_tools=False),
+                        llm=get_chat_model(worker_llm_cfg),
+                        system_message="",
+                    )
+
+                    # Run worker agent to extract reasoning + tool results
+                    worker_response_iter = worker_agent.run(messages=working_msgs, lang="en")
+                    worker_reasoning = ""
+                    worker_content = ""
+                    worker_tool_msgs: list[dict] = []
+                    seen_worker_tools = 0
+
+                    for _ in range(1000):
+                        has_item, rsp = await asyncio.to_thread(_next_from_iter, worker_response_iter)
+                        if not has_item:
+                            break
+                        if not isinstance(rsp, list):
+                            continue
+
+                        # Collect assistant reasoning and content
+                        for msg in rsp:
+                            if hasattr(msg, "get") and msg.get("role") == "assistant":
+                                reasoning = str(msg.get("reasoning_content") or msg.get("thinking") or "")
+                                content = str(msg.get("content") or "")
+                                if reasoning:
+                                    worker_reasoning = reasoning
+                                if content:
+                                    worker_content = content
+
+                        # Collect tool results from background stage
+                        tool_msgs = [
+                            m for m in rsp
+                            if hasattr(m, "get") and m.get("role") in ("function", "tool")
+                        ]
+                        if len(tool_msgs) > seen_worker_tools:
+                            for tool_msg in tool_msgs[seen_worker_tools:]:
+                                worker_tool_msgs.append(tool_msg)
+                                log.info(
+                                    "chat[%s] background tool result: name=%s",
+                                    stream_id,
+                                    tool_msg.get("name", "unknown"),
+                                )
+                            seen_worker_tools = len(tool_msgs)
+
+                    # Inject background results into main stage context
+                    if worker_reasoning or worker_tool_msgs:
+                        background_context_parts: list[str] = [
+                            "=== Background Analysis (from lightweight reasoning model) ===",
+                        ]
+                        if worker_reasoning:
+                            background_context_parts.append(f"Reasoning:\n{worker_reasoning}")
+                        if worker_tool_msgs:
+                            background_context_parts.append("Tool Results:")
+                            for tool_msg in worker_tool_msgs:
+                                tool_name = tool_msg.get("name", "unknown")
+                                tool_content = str(tool_msg.get("content", "")).strip()
+                                # Truncate extremely long tool outputs
+                                if len(tool_content) > 500:
+                                    tool_content = tool_content[:500] + "\n[... truncated ...]"
+                                background_context_parts.append(f"• {tool_name}: {tool_content}")
+
+                        background_context_text = "\n\n".join(background_context_parts)
+
+                        # Inject into working_msgs: merge with existing system message or create new one
+                        if working_msgs and working_msgs[0].get("role") == "system":
+                            working_msgs[0]["content"] = (
+                                working_msgs[0]["content"]
+                                + "\n\n"
+                                + background_context_text
+                            )
+                        else:
+                            working_msgs.insert(0, {
+                                "role": "system",
+                                "content": background_context_text,
+                            })
+
+                        log.info(
+                            "chat[%s] injected background context: reasoning_chars=%d tool_count=%d",
+                            stream_id,
+                            len(worker_reasoning),
+                            len(worker_tool_msgs),
+                        )
+
+                except Exception as exc:
+                    log.warning(
+                        "chat[%s] background stage failed; continuing with main stage only: %s",
+                        stream_id,
+                        exc,
+                    )
 
             while True:
                 response_iter = agent.run(messages=working_msgs, lang="en")
