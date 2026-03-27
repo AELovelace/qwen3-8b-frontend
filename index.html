@@ -1395,6 +1395,8 @@ let streaming = false;
 let streamAbortController = null;
 let authToken = localStorage.getItem('auth_token') || '';
 let currentUser = null;
+const UI_MIRROR_CHANNEL_NAME = 'dollchat-ui-state';
+let uiMirrorChannel = null;
 
 /* ── DOM refs ────────────────────────────────────────────────────────── */
 const appEl = document.getElementById('app');
@@ -1483,6 +1485,64 @@ function getUserPrefsKey() {
   return currentUser ? `tool_prefs_${currentUser.id}` : '';
 }
 
+function getUiMirrorStorageKey() {
+  return currentUser ? `popup_ui_state_${currentUser.id}` : '';
+}
+
+function buildUiMirrorState() {
+  if (!currentUser) return null;
+  return {
+    version: 1,
+    user_id: currentUser.id,
+    username: currentUser.username,
+    model: (modelInput?.value || '').trim() || 'qwen3-coder:30b',
+    working_subdir: getWorkingSubdir(),
+    toggles: {
+      use_gml_docs: !!gmlDocsToggle.checked,
+      use_ps_docs: !!psDocsToggle.checked,
+      use_file_tools: !!fileToolsToggle.checked,
+      use_code_interpreter: !!codeInterpreterToggle.checked,
+      use_powershell: !!powershellToggle.checked,
+      use_mcp_tools: !!mcpToolsToggle.checked,
+    },
+    updated_at: Date.now(),
+  };
+}
+
+function persistUiMirrorState(snapshot = buildUiMirrorState()) {
+  const key = getUiMirrorStorageKey();
+  if (!key || !snapshot) return;
+  localStorage.setItem(key, JSON.stringify(snapshot));
+}
+
+function ensureUiMirrorChannel() {
+  if (!('BroadcastChannel' in window)) return null;
+  if (uiMirrorChannel) return uiMirrorChannel;
+
+  uiMirrorChannel = new BroadcastChannel(UI_MIRROR_CHANNEL_NAME);
+  uiMirrorChannel.addEventListener('message', event => {
+    const data = event?.data || {};
+    if (data.type !== 'request_ui_state') return;
+    if (!currentUser || data.user_id !== currentUser.id) return;
+    broadcastUiMirrorState('request-response');
+  });
+  return uiMirrorChannel;
+}
+
+function broadcastUiMirrorState(reason = 'update') {
+  const snapshot = buildUiMirrorState();
+  if (!snapshot) return;
+  persistUiMirrorState(snapshot);
+  const channel = ensureUiMirrorChannel();
+  if (channel) {
+    channel.postMessage({
+      type: 'ui_state',
+      reason,
+      snapshot,
+    });
+  }
+}
+
 function loadUserToolPreferences() {
   const key = getUserPrefsKey();
   if (!key) return;
@@ -1511,6 +1571,7 @@ function saveUserToolPreferences() {
     use_mcp_tools: mcpToolsToggle.checked,
   };
   localStorage.setItem(key, JSON.stringify(prefs));
+  broadcastUiMirrorState('toggle-change');
 }
 
 function getWorkingSubdirKey() {
@@ -1528,6 +1589,7 @@ function setWorkingSubdir(value) {
   if (!key) return;
   const normalized = (value || '').trim();
   localStorage.setItem(key, normalized);
+  broadcastUiMirrorState('working-subdir-change');
 }
 
 function setWorkingSubdirStatus(message, isError = false) {
@@ -1569,6 +1631,8 @@ function openFileEditorPopup(filePath) {
   const path = (filePath || '').trim();
   if (!path) return;
 
+  broadcastUiMirrorState('popup-open');
+
   const params = new URLSearchParams({ path });
   const workingSubdir = getWorkingSubdir();
   if (workingSubdir) params.set('working_subdir', workingSubdir);
@@ -1586,6 +1650,7 @@ function openFileEditorPopup(filePath) {
   }
 
   popup.focus();
+  broadcastUiMirrorState('popup-focused');
 }
 
 function renderFileExplorer(cwd, entries) {
@@ -1750,6 +1815,7 @@ async function saveAdminPersonaPrompt() {
 /* ── App bootstrap/auth actions ─────────────────────────────────────── */
 async function applyAuthenticatedState(user) {
   currentUser = user;
+  ensureUiMirrorChannel();
   const isAdmin = user.role === 'admin';
 
   accountUsernameEl.textContent = user.username;
@@ -1860,6 +1926,7 @@ async function applyAuthenticatedState(user) {
   showApp();
   clearMessages();
   await Promise.all([loadConversations(), loadBraveStatus()]);
+  broadcastUiMirrorState('authenticated');
   userInput.focus();
 }
 
@@ -2963,6 +3030,11 @@ adminPersonaSaveBtn.addEventListener('click', saveAdminPersonaPrompt);
 
 [gmlDocsToggle, psDocsToggle, fileToolsToggle, codeInterpreterToggle, powershellToggle, mcpToolsToggle]
   .forEach(el => el.addEventListener('change', saveUserToolPreferences));
+
+if (modelInput) {
+  modelInput.addEventListener('input', () => broadcastUiMirrorState('model-change'));
+  modelInput.addEventListener('change', () => broadcastUiMirrorState('model-change'));
+}
 
 if (workingSubdirApplyBtn) {
   workingSubdirApplyBtn.addEventListener('click', async () => {
