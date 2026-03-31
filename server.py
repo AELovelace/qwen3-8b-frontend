@@ -85,9 +85,10 @@ OLLAMA_OPENAI_URL = f"{OLLAMA_BASE_URL}/v1"
 OLLAMA_AGENTIC_BASE_URL = os.getenv("OLLAMA_AGENTIC_BASE_URL", "http://100.66.64.45:11435").rstrip("/")
 OLLAMA_AGENTIC_URL = f"{OLLAMA_AGENTIC_BASE_URL}/api/chat"
 OLLAMA_AGENTIC_HEALTH_URL = f"{OLLAMA_AGENTIC_BASE_URL}/api/tags"
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "128000"))
 BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
-DEFAULT_MODEL     = "qwen3-coder:30b"
-DEFAULT_AGENTIC_MODEL = "qwen3:8b"
+DEFAULT_MODEL     = "qwen3.5:9b-q8_0"
+DEFAULT_AGENTIC_MODEL = "qwen3:4b"
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
 CONFIG_PATH       = Path(__file__).parent / "config.json"
@@ -113,6 +114,7 @@ CODEBASE_RESULT_LIMIT  = 6
 CODEBASE_MAX_FILES     = 3_000
 CODEBASE_MAX_FILE_BYTES = 350_000
 CODEBASE_CHUNK_CHAR_LIMIT = 1_600
+SSE_HEARTBEAT_SECONDS = 5.0
 CODEBASE_INCLUDE_GLOBS = [
     "*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.mjs", "*.cjs", "*.json", "*.md",
     "*.go", "*.rs", "*.java", "*.kt", "*.c", "*.cc", "*.cpp", "*.h", "*.hpp",
@@ -3582,17 +3584,6 @@ async def file_tools_write(body: FileToolsWriteRequest, current_user: dict = Dep
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user)):
-    if not await ensure_ollama_running(wait_seconds=6):
-        detail = (
-            f"Ollama is not available at {OLLAMA_BASE_URL}."
-            if not OLLAMA_IS_LOCAL
-            else f"Ollama is not available at {OLLAMA_BASE_URL} and auto-start failed. Start it with `ollama serve`."
-        )
-        raise HTTPException(
-            status_code=503,
-            detail=detail,
-        )
-
     global_toggles = get_global_tool_toggles()
 
     # Effective toggles: admin global switch AND per-request user switch
@@ -3621,112 +3612,6 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
         use_powershell,
         use_mcp_tools,
     ])
-
-    db = await get_db()
-    try:
-        cursor = await db.execute(
-            "SELECT id FROM conversations WHERE id=? AND user_id=?",
-            (req.conversation_id, current_user["id"]),
-        )
-        if not await cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Conversation not found")
-
-        history, was_truncated = await build_active_context(db, req.conversation_id, req.message)
-
-        fts_snippets: list[str] = []
-        if was_truncated:
-            fts_snippets = await fts_search(db, req.conversation_id, req.message, current_user["id"])
-            if fts_snippets:
-                log.info("Injecting %d FTS snippet(s) for conv %s", len(fts_snippets), req.conversation_id)
-
-        codebase_snippets: list[dict] = []
-        if effective_workspace_root and (use_file_tools or use_mcp_tools):
-            try:
-                codebase_snippets = await rag_search_codebase_docs(
-                    req.message,
-                    workspace_root=effective_workspace_root,
-                    limit=4,
-                )
-                if codebase_snippets:
-                    log.info(
-                        "Injecting %d codebase snippet(s) from %s",
-                        len(codebase_snippets),
-                        effective_workspace_root,
-                    )
-            except Exception as exc:
-                log.warning("Codebase retrieval skipped due to error: %s", exc)
-
-        # Build base message list
-        ollama_messages: list[dict] = []
-        system_prompt_parts: list[str] = []
-
-        # Global output policy
-        system_prompt_parts.append(ENGLISH_ONLY_SYSTEM_PROMPT)
-
-        # Admin persona prompt (hot-loaded from DB per request)
-        admin_persona_prompt = (current_user.get("persona_prompt") or "").strip()
-        if current_user.get("role") == "admin" and admin_persona_prompt:
-            system_prompt_parts.append(admin_persona_prompt)
-
-        # System prompts based on requested features
-        if use_gml_docs:
-            system_prompt_parts.append(GML_SYSTEM_PROMPT)
-
-        if use_ps_docs:
-            system_prompt_parts.append(PS_SYSTEM_PROMPT)
-
-        if use_file_tools:
-            if use_mcp_tools:
-                system_prompt_parts.append(MCP_FILE_TOOLS_SYSTEM_PROMPT)
-            else:
-                system_prompt_parts.append(FILE_TOOLS_SYSTEM_PROMPT)
-
-        if use_file_tools or use_mcp_tools:
-            system_prompt_parts.append(CODEBASE_INDEX_SYSTEM_PROMPT)
-            if effective_workspace_root:
-                working_subdir = (req.working_subdir or "").strip() or "."
-                system_prompt_parts.append(
-                    "Current working directory for this request: "
-                    f"{effective_workspace_root} (subdir: {working_subdir}). "
-                    "Treat this as the default root for relative paths and folder exploration."
-                )
-
-        editor_context_prompt = build_editor_context_prompt(req)
-        if editor_context_prompt:
-            system_prompt_parts.append(editor_context_prompt)
-
-        # Enforce stronger compliance when any tool/MCP path is enabled.
-        if use_any_tooling:
-            system_prompt_parts.append(TOOL_EXECUTION_CONTRACT_PROMPT)
-
-        # Long-term memory injection
-        if fts_snippets:
-            snippets_text = "\n\n---\n\n".join(fts_snippets)
-            system_prompt_parts.append(
-                "The following are relevant excerpts from your long-term memory "
-                "(earlier conversations outside the active context window). "
-                "Use them if relevant:\n\n" + snippets_text
-            )
-
-        if codebase_snippets:
-            system_prompt_parts.append(format_codebase_snippets(codebase_snippets))
-
-        if system_prompt_parts:
-            ollama_messages.append({
-                "role": "system",
-                "content": "\n\n".join(part for part in system_prompt_parts if part),
-            })
-
-        # Conversation history + new user message
-        ollama_messages.extend(history)
-        ollama_messages.append({"role": "user", "content": req.message})
-
-    except HTTPException:
-        await db.close()
-        raise
-    except Exception as exc:
-        await db.close()
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     requested_model = normalize_model_name(req.model)
 
@@ -3770,9 +3655,152 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
         file_content_writes = 0
         gml_snippet_count = 0
         ps_snippet_count = 0
-        codebase_snippet_count = len(codebase_snippets)
+        codebase_snippet_count = 0
         seen_tool_call_ids: set[str] = set()
+        fts_snippets: list[str] = []
+        codebase_snippets: list[dict] = []
+        tool_result_summaries: list[str] = []
+        background_draft_excerpt = ""
+        ollama_messages: list[dict] = []
+        working_msgs: list[dict] = []
+        db: aiosqlite.Connection | None = None
+        strict_literal_recovery_attempted = False
+
+        def _sse(payload: dict) -> str:
+            return f"data: {json.dumps(payload)}\n\n"
+
+        def _status_payload(key: str, status: str, message: str, **extra) -> dict:
+            payload = {"type": "status", "key": key, "status": status, "message": message}
+            payload.update(extra)
+            return payload
+
+        yield _sse(_status_payload("endpoint_check", "running", f"Checking chat endpoint {OLLAMA_BASE_URL}"))
+        if not await ensure_ollama_running(wait_seconds=6):
+            detail = (
+                f"Ollama is not available at {OLLAMA_BASE_URL}."
+                if not OLLAMA_IS_LOCAL
+                else f"Ollama is not available at {OLLAMA_BASE_URL} and auto-start failed. Start it with ollama serve."
+            )
+            yield _sse(_status_payload("endpoint_check", "error", detail))
+            yield _sse({"type": "error", "error_type": "connection_error", "message": detail})
+            return
+        yield _sse(_status_payload("endpoint_check", "done", "Chat endpoint is online"))
+
+        yield _sse(_status_payload("request_setup", "running", "Preparing request context"))
+
+        db = await get_db()
+        cursor = await db.execute(
+            "SELECT id FROM conversations WHERE id=? AND user_id=?",
+            (req.conversation_id, current_user["id"]),
+        )
+        if not await cursor.fetchone():
+            yield _sse({"type": "error", "error_type": "conversation_error", "message": "Conversation not found"})
+            return
+        yield _sse(_status_payload("request_setup", "done", "Conversation loaded"))
+
+        yield _sse(_status_payload("conversation_context", "running", "Loading conversation context"))
+        history, was_truncated = await build_active_context(db, req.conversation_id, req.message)
+        yield _sse(_status_payload("conversation_context", "done", f"Loaded {len(history)} context message(s)"))
+
+        if was_truncated:
+            yield _sse(_status_payload("memory_search", "running", "Searching long-term memory"))
+            fts_snippets = await fts_search(db, req.conversation_id, req.message, current_user["id"])
+            if fts_snippets:
+                log.info("Injecting %d FTS snippet(s) for conv %s", len(fts_snippets), req.conversation_id)
+            yield _sse(_status_payload("memory_search", "done", f"Long-term memory ready: {len(fts_snippets)} snippet(s)"))
+
+        if effective_workspace_root and (use_file_tools or use_mcp_tools):
+            yield _sse(_status_payload("codebase_retrieval", "running", f"Inspecting workspace {effective_workspace_root}"))
+            codebase_task = asyncio.create_task(
+                rag_search_codebase_docs(
+                    req.message,
+                    workspace_root=effective_workspace_root,
+                    limit=4,
+                )
+            )
+            codebase_heartbeat_count = 0
+            while True:
+                try:
+                    codebase_snippets = await asyncio.wait_for(
+                        asyncio.shield(codebase_task),
+                        timeout=SSE_HEARTBEAT_SECONDS,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    codebase_heartbeat_count += 1
+                    yield _sse({
+                        "type": "heartbeat",
+                        "phase": "codebase_retrieval",
+                        "count": codebase_heartbeat_count,
+                        "message": f"Still indexing and searching workspace ({int(codebase_heartbeat_count * SSE_HEARTBEAT_SECONDS)}s)",
+                    })
+            codebase_snippet_count = len(codebase_snippets)
+            if codebase_snippets:
+                log.info(
+                    "Injecting %d codebase snippet(s) from %s",
+                    len(codebase_snippets),
+                    effective_workspace_root,
+                )
+            yield _sse(_status_payload("codebase_retrieval", "done", f"Workspace context ready: {codebase_snippet_count} snippet(s)"))
+
+        yield _sse(_status_payload("prompt_build", "running", "Assembling prompt and tool policy"))
+        system_prompt_parts: list[str] = []
+        system_prompt_parts.append(ENGLISH_ONLY_SYSTEM_PROMPT)
+
+        admin_persona_prompt = (current_user.get("persona_prompt") or "").strip()
+        if current_user.get("role") == "admin" and admin_persona_prompt:
+            system_prompt_parts.append(admin_persona_prompt)
+
+        if use_gml_docs:
+            system_prompt_parts.append(GML_SYSTEM_PROMPT)
+
+        if use_ps_docs:
+            system_prompt_parts.append(PS_SYSTEM_PROMPT)
+
+        if use_file_tools:
+            if use_mcp_tools:
+                system_prompt_parts.append(MCP_FILE_TOOLS_SYSTEM_PROMPT)
+            else:
+                system_prompt_parts.append(FILE_TOOLS_SYSTEM_PROMPT)
+
+        if use_file_tools or use_mcp_tools:
+            system_prompt_parts.append(CODEBASE_INDEX_SYSTEM_PROMPT)
+            if effective_workspace_root:
+                working_subdir = (req.working_subdir or "").strip() or "."
+                system_prompt_parts.append(
+                    "Current working directory for this request: "
+                    f"{effective_workspace_root} (subdir: {working_subdir}). "
+                    "Treat this as the default root for relative paths and folder exploration."
+                )
+
+        editor_context_prompt = build_editor_context_prompt(req)
+        if editor_context_prompt:
+            system_prompt_parts.append(editor_context_prompt)
+
+        if use_any_tooling:
+            system_prompt_parts.append(TOOL_EXECUTION_CONTRACT_PROMPT)
+
+        if fts_snippets:
+            snippets_text = "\n\n---\n\n".join(fts_snippets)
+            system_prompt_parts.append(
+                "The following are relevant excerpts from your long-term memory "
+                "(earlier conversations outside the active context window). "
+                "Use them if relevant:\n\n" + snippets_text
+            )
+
+        if codebase_snippets:
+            system_prompt_parts.append(format_codebase_snippets(codebase_snippets))
+
+        if system_prompt_parts:
+            ollama_messages.append({
+                "role": "system",
+                "content": "\n\n".join(part for part in system_prompt_parts if part),
+            })
+
+        ollama_messages.extend(history)
+        ollama_messages.append({"role": "user", "content": req.message})
         working_msgs = list(ollama_messages)
+        yield _sse(_status_payload("prompt_build", "done", "Prompt ready, starting model execution"))
 
         # Some backends require at most one system message and require it first.
         # Collapse any stray system messages from history/tool traces into one.
@@ -3873,6 +3901,30 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             except StopIteration:
                 return False, None
 
+        async def _iter_with_heartbeat(response_iter, *, phase_key: str, phase_label: str):
+            heartbeat_count = 0
+            while True:
+                next_task = asyncio.create_task(asyncio.to_thread(_next_from_iter, response_iter))
+                while True:
+                    try:
+                        has_item, rsp = await asyncio.wait_for(
+                            asyncio.shield(next_task),
+                            timeout=SSE_HEARTBEAT_SECONDS,
+                        )
+                        break
+                    except asyncio.TimeoutError:
+                        heartbeat_count += 1
+                        elapsed_seconds = int(heartbeat_count * SSE_HEARTBEAT_SECONDS)
+                        yield {
+                            "type": "heartbeat",
+                            "phase": phase_key,
+                            "count": heartbeat_count,
+                            "message": f"{phase_label} ({elapsed_seconds}s)",
+                        }
+                if not has_item:
+                    break
+                yield {"type": "response", "rsp": rsp}
+
         def _parse_literal_tool_markup(text: str) -> tuple[str, dict] | None:
             """Parse legacy literal tool markup from assistant content.
 
@@ -3907,24 +3959,82 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             cleaned = re.sub(r"</?\s*tool_call\s*>", "", cleaned, flags=re.IGNORECASE)
             return cleaned.strip()
 
-        def _execute_literal_tool_call(tool_name: str, args: dict) -> str:
-            """Execute parsed literal tool markup as a fail-open compatibility path."""
+        def _execute_literal_tool_call(tool_name: str, args: dict) -> tuple[bool, str]:
+            """Execute parsed literal tool markup as a fail-open compatibility path.
+
+            Returns (handled, content). handled=False means the tool name was not mapped.
+            """
+            normalized_tool = str(tool_name or "").strip().lower()
+            workspace_root_for_fallback = (
+                effective_workspace_root
+                or str(current_user.get("workspace_root") or "").strip()
+                or str(Path(__file__).parent.resolve())
+            )
+
+            def _arg(*keys: str, default: str = "") -> str:
+                for key in keys:
+                    val = args.get(key)
+                    if val is not None and str(val).strip():
+                        return str(val).strip()
+                return default
+
+            def _safe_int(value, default: int) -> int:
+                try:
+                    return int(value)
+                except Exception:
+                    return default
+
+            def _directory_tree_snapshot(path_value: str, max_depth: int = 2, max_entries: int = 250) -> str:
+                target = (
+                    Path(workspace_root_for_fallback).resolve()
+                    if path_value in {"", "."}
+                    else resolve_sandboxed_path(workspace_root_for_fallback, path_value)
+                )
+                if not target.is_dir():
+                    raise FileToolError(f"Not a directory or does not exist: {target}")
+
+                lines: list[str] = []
+                root_depth = len(target.parts)
+                stack: list[Path] = [target]
+                while stack and len(lines) < max_entries:
+                    current = stack.pop()
+                    try:
+                        rel = current.relative_to(target)
+                        rel_str = "." if str(rel) == "." else rel.as_posix()
+                    except ValueError:
+                        rel_str = current.name
+                    depth = max(0, len(current.parts) - root_depth)
+                    indent = "  " * depth
+                    marker = "/" if current.is_dir() else ""
+                    lines.append(f"{indent}{rel_str}{marker}")
+                    if current.is_dir() and depth < max_depth:
+                        children = sorted(
+                            list(current.iterdir()),
+                            key=lambda p: (not p.is_dir(), p.name.lower()),
+                        )
+                        for child in reversed(children[:50]):
+                            stack.append(child)
+
+                if len(lines) >= max_entries:
+                    lines.append("[tree truncated]")
+                return "\n".join(lines)
+
             if tool_name == "code_interpreter":
                 code = str(args.get("code") or "").strip()
                 if not code:
-                    return "[Error: code_interpreter requires a non-empty 'code' parameter]"
+                    return True, "[Error: code_interpreter requires a non-empty 'code' parameter]"
                 if not (use_code_interpreter and code_interpreter.is_available()):
-                    return "[Error: code_interpreter is disabled or unavailable]"
-                return code_interpreter.call(code)
+                    return True, "[Error: code_interpreter is disabled or unavailable]"
+                return True, code_interpreter.call(code)
 
             if tool_name == "run_powershell":
                 code = str(args.get("code") or "").strip()
                 if not code:
-                    return "[Error: run_powershell requires a non-empty 'code' parameter]"
+                    return True, "[Error: run_powershell requires a non-empty 'code' parameter]"
                 if not use_powershell:
-                    return "[Error: run_powershell is disabled for this request]"
+                    return True, "[Error: run_powershell is disabled for this request]"
                 if not is_ps_available(ps_mode):
-                    return f"[Error: run_powershell mode '{ps_mode}' is unavailable]"
+                    return True, f"[Error: run_powershell mode '{ps_mode}' is unavailable]"
                 try:
                     timeout = int(args.get("timeout") or 30)
                 except Exception:
@@ -3933,10 +4043,59 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 session = get_or_create_ps_session(session_key, ps_mode)
                 output, timed_out = session.execute(code, timeout=timeout)
                 if timed_out:
-                    return f"[Timeout after {timeout}s]" + (f"\n{output}" if output else "")
-                return output or "(no output)"
+                    return True, f"[Timeout after {timeout}s]" + (f"\n{output}" if output else "")
+                return True, output or "(no output)"
 
-            return f"[Error: Unsupported literal fallback tool: {tool_name}]"
+            if normalized_tool in {"filesystem-list_allowed_directories", "filesystem-list-allowed-directories"}:
+                allowed = [workspace_root_for_fallback]
+                base_root = str(current_user.get("workspace_root") or "").strip()
+                if base_root and base_root not in allowed:
+                    allowed.append(base_root)
+                return True, "\n".join(f"[DIR] {p}" for p in allowed)
+
+            if normalized_tool in {"filesystem-list_directory", "filesystem-list-directory", "list_dir"}:
+                path_arg = _arg("path", "directory", "dir", "target", default=".")
+                return True, ft_list_dir(workspace_root_for_fallback, path_arg)
+
+            if normalized_tool in {"filesystem-directory_tree", "filesystem-directory-tree"}:
+                path_arg = _arg("path", "directory", "dir", "target", default=".")
+                return True, _directory_tree_snapshot(path_arg)
+
+            if normalized_tool in {"filesystem-read_file", "filesystem-read-file", "read_file"}:
+                path_arg = _arg("path", "file_path", "target", default="")
+                if not path_arg:
+                    return True, "[Error: read_file requires a 'path' parameter]"
+                start_line = _safe_int(args.get("start_line", 1), 1)
+                end_raw = args.get("end_line")
+                end_line = _safe_int(end_raw, 0) if end_raw not in (None, "") else None
+                if end_line is not None and end_line <= 0:
+                    end_line = None
+                return True, ft_read_file(workspace_root_for_fallback, path_arg, start_line=start_line, end_line=end_line)
+
+            if normalized_tool in {"filesystem-search_files", "filesystem-search-files", "search_files"}:
+                pattern = _arg("pattern", "glob", "query", default="*")
+                directory = _arg("directory", "path", "dir", default=".")
+                return True, ft_search_files(workspace_root_for_fallback, pattern=pattern, directory=directory)
+
+            if normalized_tool in {"filesystem-get_file_info", "filesystem-get-file-info"}:
+                path_arg = _arg("path", "file_path", "target", default=".")
+                target = (
+                    Path(workspace_root_for_fallback).resolve()
+                    if path_arg in {"", "."}
+                    else resolve_sandboxed_path(workspace_root_for_fallback, path_arg)
+                )
+                if not target.exists():
+                    return True, f"[Error: Path does not exist: {path_arg}]"
+                stat = target.stat()
+                return True, "\n".join([
+                    f"path: {target}",
+                    f"size: {stat.st_size}",
+                    f"isDirectory: {target.is_dir()}",
+                    f"isFile: {target.is_file()}",
+                    f"modified: {datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()}",
+                ])
+
+            return False, f"[Error: Unsupported literal fallback tool: {tool_name}]"
 
         def _build_function_list_labels(function_list: list) -> list[str]:
             labels: list[str] = []
@@ -4021,14 +4180,17 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
 
             # OpenAI-compatible clients reject unknown top-level args like `think`.
             # Pass reasoning toggle via extra_body for backends (e.g. Ollama) that support it.
+            extra_body = {"options": {"num_ctx": OLLAMA_NUM_CTX}}
             if req.think is not None:
-                generate_cfg["extra_body"] = {"think": bool(req.think)}
+                extra_body["think"] = bool(req.think)
+            generate_cfg["extra_body"] = extra_body
             log.info(
-                "chat[%s] llm generate_cfg use_raw_api=%s fncall_prompt_type=%r think=%s",
+                "chat[%s] llm generate_cfg use_raw_api=%s fncall_prompt_type=%r think=%s num_ctx=%s",
                 stream_id,
                 use_raw_api,
                 fncall_prompt_type,
                 req.think,
+                OLLAMA_NUM_CTX,
             )
 
             llm_cfg = {
@@ -4064,17 +4226,47 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             routing_config = get_model_routing_config()
             agentic_policy = routing_config.get("agentic_policy", "all_tooling")
             agentic_endpoint_base_url = routing_config.get("agentic_endpoint_url", OLLAMA_AGENTIC_BASE_URL).rstrip("/")
-            agentic_endpoint_model = routing_config.get("agentic_model", DEFAULT_AGENTIC_MODEL)
+            agentic_endpoint_model = normalize_model_name(
+                req.agentic_model or routing_config.get("agentic_model", DEFAULT_AGENTIC_MODEL)
+            )
             agentic_health_url = f"{agentic_endpoint_base_url}/api/tags"
+            agentic_endpoint_online = await is_ollama_endpoint_running(agentic_health_url)
+            main_model_server = str(llm_cfg.get("model_server") or "")
+            background_model_server = f"{agentic_endpoint_base_url}/v1"
+
+            yield _sse(
+                _status_payload(
+                    "routing_summary",
+                    "done",
+                    (
+                        f"Routing: main {requested_model} -> {main_model_server}; "
+                        f"background {agentic_endpoint_model} -> {background_model_server} "
+                        f"(policy={agentic_policy})"
+                    ),
+                )
+            )
+            log.info(
+                "chat[%s] routing summary main_model=%s main_server=%s background_model=%s background_server=%s policy=%s",
+                stream_id,
+                requested_model,
+                main_model_server,
+                agentic_endpoint_model,
+                background_model_server,
+                agentic_policy,
+            )
 
             # Determine if background stage should run
             run_background_stage = (
-                heavy_tooling_requested
-                and agentic_policy == "all_tooling"
-                and await is_ollama_endpoint_running(agentic_health_url)
+                use_any_tooling
+                and (
+                    agentic_policy == "all_tooling"
+                    or (agentic_policy == "heavy_only" and heavy_tooling_requested)
+                )
+                and agentic_endpoint_online
             )
 
             if run_background_stage:
+                yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'running', 'message': f'Background tool stage running on {agentic_endpoint_model}'})}\n\n"
                 log.info(
                     "chat[%s] triggering background stage: heavy_tooling=%s policy=%s endpoint=%s model=%s",
                     stream_id,
@@ -4091,7 +4283,10 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                         "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
                         "generate_cfg": {
                             "use_raw_api": use_raw_api,
-                            "extra_body": {"think": True},
+                            "extra_body": {
+                                "think": True,
+                                "options": {"num_ctx": OLLAMA_NUM_CTX},
+                            },
                         },
                     }
                     worker_agent = Assistant(
@@ -4107,10 +4302,15 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     worker_tool_msgs: list[dict] = []
                     seen_worker_tools = 0
 
-                    for _ in range(1000):
-                        has_item, rsp = await asyncio.to_thread(_next_from_iter, worker_response_iter)
-                        if not has_item:
-                            break
+                    async for packet in _iter_with_heartbeat(
+                        worker_response_iter,
+                        phase_key="background_stage",
+                        phase_label=f"Background model is thinking on {agentic_endpoint_model}",
+                    ):
+                        if packet.get("type") == "heartbeat":
+                            yield _sse(packet)
+                            continue
+                        rsp = packet.get("rsp")
                         if not isinstance(rsp, list):
                             continue
 
@@ -4140,12 +4340,18 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                             seen_worker_tools = len(tool_msgs)
 
                     # Inject background results into main stage context
-                    if worker_reasoning or worker_tool_msgs:
+                    if worker_reasoning or worker_content or worker_tool_msgs:
                         background_context_parts: list[str] = [
                             "=== Background Analysis (from lightweight reasoning model) ===",
                         ]
                         if worker_reasoning:
                             background_context_parts.append(f"Reasoning:\n{worker_reasoning}")
+                        if worker_content:
+                            compact_worker_content = worker_content.strip()
+                            if len(compact_worker_content) > 1200:
+                                compact_worker_content = compact_worker_content[:1200].rstrip() + "\n[... truncated ...]"
+                            background_draft_excerpt = compact_worker_content
+                            background_context_parts.append(f"Background draft:\n{compact_worker_content}")
                         if worker_tool_msgs:
                             background_context_parts.append("Tool Results:")
                             for tool_msg in worker_tool_msgs:
@@ -4178,14 +4384,33 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                             len(worker_tool_msgs),
                         )
 
+                    yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'done', 'message': f'Background stage complete: {len(worker_tool_msgs)} tool result(s), draft_chars={len(worker_content.strip())}'})}\n\n"
+
                 except Exception as exc:
                     log.warning(
                         "chat[%s] background stage failed; continuing with main stage only: %s",
                         stream_id,
                         exc,
                     )
+                    yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'error', 'message': f'Background stage failed, continuing on main model: {exc}'})}\n\n"
+            else:
+                skip_reason = "policy/feature gating"
+                if not use_any_tooling:
+                    skip_reason = "no tooling requested"
+                elif agentic_policy == "heavy_only" and not heavy_tooling_requested:
+                    skip_reason = "heavy_only policy with light tooling"
+                elif not agentic_endpoint_online:
+                    skip_reason = f"agentic endpoint offline at {agentic_endpoint_base_url}"
+                yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'done', 'message': f'Background stage skipped: {skip_reason}'})}\n\n"
 
             while True:
+                yield _sse(
+                    _status_payload(
+                        "main_stage",
+                        "running",
+                        f"Main model {requested_model} is thinking on {main_model_server}",
+                    )
+                )
                 response_iter = agent.run(messages=working_msgs, lang="en")
                 prev_content = ""
                 prev_thinking = ""
@@ -4193,10 +4418,15 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 emitted_output = False
 
                 try:
-                    while True:
-                        has_item, rsp = await asyncio.to_thread(_next_from_iter, response_iter)
-                        if not has_item:
-                            break
+                    async for packet in _iter_with_heartbeat(
+                        response_iter,
+                        phase_key="main_stage",
+                        phase_label=f"Main model {requested_model} is thinking",
+                    ):
+                        if packet.get("type") == "heartbeat":
+                            yield _sse(packet)
+                            continue
+                        rsp = packet.get("rsp")
                         if not isinstance(rsp, list):
                             continue
 
@@ -4334,6 +4564,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                                     )
                                 tool_ok = not bool(TOOL_ERROR_RE.search(tool_content))
                                 tool_summary = _compact_tool_summary(tool_name, tool_content, tool_ok)
+                                tool_result_summaries.append(f"{tool_name}: {tool_summary}")
                                 yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': tool_ok, 'summary': tool_summary})}\n\n"
                                 emitted_output = True
                                 tools_called += 1
@@ -4381,21 +4612,27 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     stream_id,
                     preview,
                 )
-                if tool_name in {"code_interpreter", "run_powershell"}:
-                    yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args_obj})}\n\n"
-                    tool_result = await asyncio.to_thread(_execute_literal_tool_call, tool_name, args_obj)
+                yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args_obj})}\n\n"
+                handled, tool_result = await asyncio.to_thread(_execute_literal_tool_call, tool_name, args_obj)
+                if handled:
                     tool_ok = not bool(TOOL_ERROR_RE.search(tool_result))
                     tool_summary = re.sub(r"\s+", " ", tool_result).strip()[:300]
+                    tool_result_summaries.append(f"{tool_name}: {tool_summary if tool_summary else ('ok' if tool_ok else 'error')}")
                     yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': tool_ok, 'summary': tool_summary if tool_summary else ('ok' if tool_ok else 'error')})}\n\n"
                     tools_called += 1
-                    if tool_name == "code_interpreter":
+                    lowered_literal_tool = str(tool_name or "").lower()
+                    if lowered_literal_tool == "code_interpreter":
                         code_runs += 1
-                    elif tool_name == "run_powershell":
+                    elif lowered_literal_tool == "run_powershell":
                         powershell_runs += 1
+                    elif "read_file" in lowered_literal_tool:
+                        file_reads += 1
+                    elif any(k in lowered_literal_tool for k in ["write_file", "replace_in_file", "create_directory"]):
+                        file_writes += 1
+
                     cleaned_prefix = _strip_literal_tool_markup(final_content)
                     final_content = f"{cleaned_prefix}\n\n{tool_result}".strip() if cleaned_prefix else tool_result
-                    fallback_delta = "\n\n" + tool_result
-                    yield f"data: {json.dumps({'type': 'content', 'delta': fallback_delta})}\n\n"
+                    yield f"data: {json.dumps({'type': 'content_replace', 'content': final_content})}\n\n"
                     token_count = estimate_tokens(final_content + all_thinking)
                 else:
                     cleaned = _strip_literal_tool_markup(final_content)
@@ -4407,6 +4644,77 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                         "instead of native tool_calls."
                     )
                     yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': False, 'summary': summary})}\n\n"
+
+                    if not strict_literal_recovery_attempted:
+                        strict_literal_recovery_attempted = True
+                        yield _sse(_status_payload("strict_recovery", "running", "Literal tool markup could not be mapped; running strict recovery pass"))
+                        recovery_messages = [dict(m) if isinstance(m, dict) else m for m in working_msgs]
+                        strict_instruction = (
+                            "Recovery mode: your previous response emitted literal tool markup. "
+                            "Do not emit <function=...> tags. Do not call tools in this pass. "
+                            "Using the provided conversation context and background analysis, "
+                            "produce the best direct answer for the user now."
+                        )
+                        if recovery_messages and isinstance(recovery_messages[0], dict) and recovery_messages[0].get("role") == "system":
+                            recovery_messages[0]["content"] = str(recovery_messages[0].get("content") or "") + "\n\n" + strict_instruction
+                        else:
+                            recovery_messages.insert(0, {"role": "system", "content": strict_instruction})
+
+                        recovery_agent = Assistant(
+                            function_list=[],
+                            llm=get_chat_model(llm_cfg),
+                            system_message="",
+                        )
+                        recovery_iter = recovery_agent.run(messages=recovery_messages, lang="en")
+                        recovery_content = ""
+                        recovery_thinking = ""
+                        async for packet in _iter_with_heartbeat(
+                            recovery_iter,
+                            phase_key="strict_recovery",
+                            phase_label=f"Strict recovery on {requested_model}",
+                        ):
+                            if packet.get("type") == "heartbeat":
+                                yield _sse(packet)
+                                continue
+                            rsp = packet.get("rsp")
+                            if not isinstance(rsp, list):
+                                continue
+                            for msg in rsp:
+                                if not (hasattr(msg, "get") and msg.get("role") == "assistant"):
+                                    continue
+                                c = str(msg.get("content") or "")
+                                t = str(msg.get("reasoning_content") or msg.get("thinking") or "")
+                                if c:
+                                    recovery_content = c
+                                if t:
+                                    recovery_thinking = t
+
+                        if recovery_content.strip():
+                            final_content = recovery_content.strip()
+                            if recovery_thinking.strip():
+                                all_thinking = recovery_thinking.strip()
+                            yield f"data: {json.dumps({'type': 'content_replace', 'content': final_content})}\n\n"
+                            token_count = estimate_tokens(final_content + all_thinking)
+                            yield _sse(_status_payload("strict_recovery", "done", "Strict recovery produced a final answer"))
+                        else:
+                            yield _sse(_status_payload("strict_recovery", "error", "Strict recovery produced no assistant content"))
+
+            if not str(final_content or "").strip():
+                synthesized_parts: list[str] = [
+                    "I could not produce a direct final answer from the model output, but here is what I gathered:",
+                ]
+                if background_draft_excerpt:
+                    synthesized_parts.append("Background draft:\n" + background_draft_excerpt[:900])
+                if tool_result_summaries:
+                    compact_summaries = tool_result_summaries[:6]
+                    synthesized_parts.append("Tool observations:\n" + "\n".join(f"- {line}" for line in compact_summaries))
+                if codebase_snippet_count:
+                    synthesized_parts.append(f"Retrieved {codebase_snippet_count} codebase snippet(s) for context.")
+                if len(synthesized_parts) == 1:
+                    synthesized_parts.append("No tool outputs or background draft were available.")
+                final_content = "\n\n".join(synthesized_parts).strip()
+                yield f"data: {json.dumps({'type': 'content_replace', 'content': final_content})}\n\n"
+                token_count = estimate_tokens(final_content + all_thinking)
             final_content_preview = re.sub(r"\s+", " ", final_content).strip()[:400]
             final_thinking_preview = re.sub(r"\s+", " ", all_thinking).strip()[:250]
             log.info("chat[%s] final_content=%r", stream_id, final_content_preview)
@@ -4422,7 +4730,8 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 file_reads,
                 file_writes,
             )
-            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'searches_done': searches_done, 'commands_run': code_runs, 'code_runs': code_runs, 'powershell_runs': powershell_runs, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': gml_snippet_count > 0, 'gml_snippet_count': gml_snippet_count, 'ps_docs_used': ps_snippet_count > 0, 'ps_docs_snippet_count': ps_snippet_count, 'codebase_used': codebase_snippet_count > 0, 'codebase_snippet_count': codebase_snippet_count})}\n\n"
+            yield _sse(_status_payload("main_stage", "done", "Main model response complete"))
+            yield f"data: {json.dumps({'type': 'done', 'token_count': token_count, 'fts_used': bool(fts_snippets), 'tools_called': tools_called, 'searches_done': searches_done, 'commands_run': code_runs, 'code_runs': code_runs, 'powershell_runs': powershell_runs, 'file_reads': file_reads, 'file_writes': file_writes, 'gml_used': gml_snippet_count > 0, 'gml_snippet_count': gml_snippet_count, 'ps_docs_used': ps_snippet_count > 0, 'ps_docs_snippet_count': ps_snippet_count, 'codebase_used': codebase_snippet_count > 0, 'codebase_snippet_count': codebase_snippet_count, 'main_model': requested_model, 'main_model_server': main_model_server, 'background_model': agentic_endpoint_model, 'background_model_server': background_model_server})}\n\n"
         except Exception as exc:
             log.exception("chat[%s] streaming error", stream_id)
             error_text = str(exc)
@@ -4438,13 +4747,14 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 error_type = "connection_error"
             yield f"data: {json.dumps({'type': 'error', 'error_type': error_type, 'message': error_text})}\n\n"
         finally:
-            if final_content or all_thinking:
+            if db is not None and (final_content or all_thinking):
                 try:
                     await save_messages(db, req.conversation_id, req.message, final_content, all_thinking)
                 except Exception as exc:
                     log.error("chat[%s] failed to save messages: %s", stream_id, exc)
             log.info("chat[%s] stream closed", stream_id)
-            await db.close()
+            if db is not None:
+                await db.close()
 
     return StreamingResponse(
         event_stream(),
