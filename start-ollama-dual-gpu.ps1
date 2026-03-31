@@ -13,14 +13,14 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-# qwen2.5:7b is kept on-disk as a rollback target; qwen3:8b and qwen3:4b are the
-# active models.  Only qwen3:8b is pre-loaded into accelerator memory at startup.
+# qwen2.5:7b is kept on-disk as a rollback target; qwen3:4b and qwen3:8b are the
+# active models. Only qwen3:4b is pre-loaded into accelerator memory at startup.
 $PullModels = @(
     "qwen2.5:7b",   # rollback — stays on disk, not preheated
-    "qwen3:8b",
-    "qwen3:4b"
+    "qwen3:4b",
+    "qwen3:8b"
 )
-$DefaultPreloadModel = "qwen3:8b"   # only model loaded into accelerator memory at startup
+$DefaultPreloadModel = "qwen3:4b"   # only model loaded into accelerator memory at startup
 $BlockedWarmModel = "qwen2.5:14b"  # too large for Titan X Maxwell; never load
 $MaxLoadedModels = 1
 
@@ -510,7 +510,7 @@ foreach ($node in $nodes) {
 }
 
 if ($Abliterated) {
-    Write-Warning "-Abliterated is not used in this launcher. The default preloaded model is qwen3:8b. To run the abliterated variant, update DefaultPreloadModel and re-run the script."
+    Write-Warning "-Abliterated is not used in this launcher. The default preloaded model is qwen3:4b. To run the abliterated variant, update DefaultPreloadModel and re-run the script."
 }
 
 if (-not $SkipFirewall) {

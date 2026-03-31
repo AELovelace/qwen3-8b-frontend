@@ -2325,6 +2325,17 @@ async function handleSend() {
   let toolsDone = 0;
   const activeSearchEls = new Map();
   const pendingToolEls = new Map();
+  const statusEls = new Map();
+
+  function showStreamWarning(message) {
+    const ind = document.createElement('div');
+    ind.className = 'tool-indicator error';
+    const textEl = document.createElement('span');
+    textEl.textContent = message;
+    ind.appendChild(textEl);
+    toolIndicatorsEl.appendChild(ind);
+    scrollToBottom();
+  }
 
   try {
     const res = await apiFetch('/api/chat', {
@@ -2488,10 +2499,66 @@ async function handleSend() {
           }
           scrollToBottom();
 
+        } else if (evt.type === 'heartbeat') {
+          const key = `heartbeat:${String(evt.phase || 'stream')}`;
+          let ind = statusEls.get(key);
+          if (!ind) {
+            ind = document.createElement('div');
+            ind.className = 'tool-indicator';
+            const si = document.createElement('span');
+            si.className = 'si-spinner';
+            ind.appendChild(si);
+            const lbl = document.createElement('span');
+            ind.appendChild(lbl);
+            toolIndicatorsEl.appendChild(ind);
+            statusEls.set(key, ind);
+          }
+          ind.classList.remove('done', 'error');
+          const sp = ind.querySelector('.si-spinner');
+          if (sp) sp.style.display = '';
+          const textEl = ind.querySelector('span:last-child');
+          if (textEl) textEl.textContent = String(evt.message || 'Still working...');
+          scrollToBottom();
+
+        } else if (evt.type === 'status') {
+          const key = String(evt.key || evt.message || 'status');
+          let ind = statusEls.get(key);
+          if (!ind) {
+            ind = document.createElement('div');
+            ind.className = 'tool-indicator';
+            const si = document.createElement('span');
+            si.className = 'si-spinner';
+            ind.appendChild(si);
+            const lbl = document.createElement('span');
+            ind.appendChild(lbl);
+            toolIndicatorsEl.appendChild(ind);
+            statusEls.set(key, ind);
+          }
+          ind.classList.remove('done', 'error');
+          if (evt.status === 'done') ind.classList.add('done');
+          if (evt.status === 'error') ind.classList.add('error');
+          const sp = ind.querySelector('.si-spinner');
+          if (sp) sp.style.display = evt.status === 'running' ? '' : 'none';
+          const textEl = ind.querySelector('span:last-child');
+          if (textEl) textEl.textContent = String(evt.message || 'Working...');
+          const heartbeatKey = `heartbeat:${key}`;
+          const heartbeatInd = statusEls.get(heartbeatKey);
+          if (heartbeatInd && evt.status !== 'running') {
+            heartbeatInd.classList.add(evt.status === 'error' ? 'error' : 'done');
+            const heartbeatSpinner = heartbeatInd.querySelector('.si-spinner');
+            if (heartbeatSpinner) heartbeatSpinner.style.display = 'none';
+          }
+          scrollToBottom();
+
         } else if (evt.type === 'error') {
           contentBubble.classList.remove('cursor');
-          contentBubble.className = 'error-bubble';
-          contentBubble.textContent = evt.message;
+          spinner.style.display = 'none';
+          if (assistantRawContent.trim() || hasThinking || toolIndicatorsEl.children.length) {
+            showStreamWarning(`Stream error: ${evt.message}`);
+          } else {
+            contentBubble.className = 'error-bubble';
+            contentBubble.textContent = evt.message;
+          }
         }
       }
     }
@@ -2505,8 +2572,13 @@ async function handleSend() {
       }
     } else {
       contentBubble.classList.remove('cursor');
-      contentBubble.className = 'error-bubble';
-      contentBubble.textContent = `Connection error: ${err.message || err}`;
+      spinner.style.display = 'none';
+      if (assistantRawContent.trim() || hasThinking || toolIndicatorsEl.children.length) {
+        showStreamWarning(`Connection error after partial response: ${err.message || err}`);
+      } else {
+        contentBubble.className = 'error-bubble';
+        contentBubble.textContent = `Connection error: ${err.message || err}`;
+      }
     }
   } finally {
     streaming = false;
