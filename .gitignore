@@ -12,3 +12,5 @@ ps_docs_embeddings/
 *.sqlite3
 *.db-shm
 *.db-wal
+gml_embeddings/chroma.sqlite3
+ps_docs_embeddings/chroma.sqlite3
