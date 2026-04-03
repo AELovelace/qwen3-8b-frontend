@@ -7,4 +7,8 @@ chroma.sqlite3
 node_modules/
 codebase_embeddings/
 workspace_embeddings/
-chroma.sqlite3
+gml_embeddings/
+ps_docs_embeddings/
+*.sqlite3
+*.db-shm
+*.db-wal
