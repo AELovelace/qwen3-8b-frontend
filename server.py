@@ -87,8 +87,21 @@ OLLAMA_AGENTIC_URL = f"{OLLAMA_AGENTIC_BASE_URL}/api/chat"
 OLLAMA_AGENTIC_HEALTH_URL = f"{OLLAMA_AGENTIC_BASE_URL}/api/tags"
 OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "128000"))
 BRAVE_SEARCH_URL  = "https://api.search.brave.com/res/v1/web/search"
-DEFAULT_MODEL     = "qwen3.5:9b-q8_0"
+DEFAULT_MODEL     = os.getenv("DEFAULT_MODEL", "qwen3.5:9b-q8_0")
 DEFAULT_AGENTIC_MODEL = "qwen3:4b"
+DEFAULT_OPENAI_MODEL = os.getenv("DEFAULT_OPENAI_MODEL", "gpt-4.1-mini")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+OPENAI_MODEL_OPTIONS = [
+    "gpt-5.1",
+    "gpt-5.2",
+    "gpt-5.3-codex",
+    "gpt-5.4",
+    "gpt-5.4-long-context",
+    "gpt-4.1-mini",
+    "gpt-4o-mini",
+    "o4-mini",
+    "o3",
+]
 DB_PATH           = Path(__file__).parent / "memory.db"
 HTML_PATH         = Path(__file__).parent / "index.html"
 CONFIG_PATH       = Path(__file__).parent / "config.json"
@@ -115,6 +128,7 @@ CODEBASE_MAX_FILES     = 3_000
 CODEBASE_MAX_FILE_BYTES = 350_000
 CODEBASE_CHUNK_CHAR_LIMIT = 1_600
 SSE_HEARTBEAT_SECONDS = 5.0
+BACKGROUND_WORKER_TIMEOUT_SECONDS = int(os.getenv("BACKGROUND_WORKER_TIMEOUT", "90"))
 CODEBASE_INCLUDE_GLOBS = [
     "*.py", "*.js", "*.jsx", "*.ts", "*.tsx", "*.mjs", "*.cjs", "*.json", "*.md",
     "*.go", "*.rs", "*.java", "*.kt", "*.c", "*.cc", "*.cpp", "*.h", "*.hpp",
@@ -132,6 +146,36 @@ ACCESS_TOKEN_HOURS     = 24
 SEARCH_TAG_RE = re.compile(r'<search>(.*?)</search>', re.IGNORECASE | re.DOTALL)
 GML_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*")
 THINK_TAG_RE = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
+SMALLTALK_RE = re.compile(
+    r"^\s*(?:hi|hello|hey|yo|sup|thanks|thank you|ok|okay|cool|nice|good morning|good night|how are you)\b[\s!?.]*$",
+    re.IGNORECASE,
+)
+SEARCH_INTENT_RE = re.compile(
+    r"\b(?:current|latest|today|news|recent|release date|version|price|weather|who is|what is|when did|web|search)\b",
+    re.IGNORECASE,
+)
+FILE_INTENT_RE = re.compile(
+    r"\b(?:file|folder|directory|workspace|repo|repository|codebase|read|write|edit|rename|refactor|grep|search files|list files|implement|fix|bug|error|traceback)\b",
+    re.IGNORECASE,
+)
+GML_INTENT_RE = re.compile(
+    r"\b(?:gml|gamemaker|sprite|object|room|instance|draw event|step event|manual)\b",
+    re.IGNORECASE,
+)
+POWERSHELL_INTENT_RE = re.compile(
+    r"\b(?:powershell|pwsh|cmdlet|script|module|pipeline|invoke-command|ps1)\b",
+    re.IGNORECASE,
+)
+EXECUTION_INTENT_RE = re.compile(
+    r"\b(?:run|execute|exec|compute|calculate|debug|automate)\b",
+    re.IGNORECASE,
+)
+# Short-circuit: messages whose primary intent is writing/saving to a path.
+# Background helpers are read-only and provide no value for pure write tasks.
+WRITE_ONLY_RE = re.compile(
+    r"(?:^|\n)\s*(?:(?:ok|okay|please|now|just|then|and|also|great|thanks|thank you|alright|all right|can you|could you)\b[\s,.:;\-]*){0,4}(?:save|write|store|put|output|create)\b[^\n]{0,250}?(?:\bas\b\s+)?(?:[a-zA-Z]:[/\\][\w./\\-]+|[/\\][\w./\\-]+|[\w.-]+\.[a-zA-Z0-9]{1,8}\b)",
+    re.IGNORECASE,
+)
 TOOL_ERROR_RE = re.compile(
     r"^\s*(?:"
     r"\[(?:error|permission denied|timeout|exception)[:\]]|"
@@ -268,14 +312,24 @@ async def lifespan(app: FastAPI):
     app.state.gml_embeddings_building = CHROMADB_AVAILABLE
     app.state.ps_embeddings_ready = False
     app.state.ps_embeddings_building = CHROMADB_AVAILABLE
+    app.state.startup_tasks = []
     if CHROMADB_AVAILABLE:
         get_or_init_embedding_model()
         get_or_init_chroma_client("gml")
         get_or_init_chroma_client("ps")
-        asyncio.create_task(_build_gml_embeddings_background())
-        asyncio.create_task(_build_ps_embeddings_background())
+        gml_task = asyncio.create_task(_build_gml_embeddings_background())
+        ps_task = asyncio.create_task(_build_ps_embeddings_background())
+        app.state.startup_tasks = [gml_task, ps_task]
     log.info("Database initialised at %s", DB_PATH)
-    yield
+    try:
+        yield
+    finally:
+        startup_tasks = list(getattr(app.state, "startup_tasks", []) or [])
+        pending_startup = [t for t in startup_tasks if not t.done()]
+        if pending_startup:
+            for task in pending_startup:
+                task.cancel()
+            await asyncio.gather(*pending_startup, return_exceptions=True)
 
 
 app = FastAPI(title="Ollama Qwen3 Chat", lifespan=lifespan)
@@ -725,6 +779,7 @@ class ChatRequest(BaseModel):
     conversation_id: str
     message: str
     model: str = DEFAULT_MODEL
+    model_provider: str = "local"  # "local" (Ollama) | "openai" (ChatGPT API)
     agentic_model: str = DEFAULT_AGENTIC_MODEL  # Used for background tool execution on 11435
     surface: str = "main"
     think: bool = True
@@ -746,7 +801,9 @@ class ChatRequest(BaseModel):
 
 
 class SettingsUpdate(BaseModel):
-    brave_api_key: str = ""
+    brave_api_key: str | None = None
+    llm_provider: str | None = None
+    openai_model: str | None = None
 
 
 class LoginRequest(BaseModel):
@@ -782,6 +839,7 @@ class AdminGlobalToolingUpdateRequest(BaseModel):
     use_powershell: str = "off"  # "off" | "native" | "docker"
     use_mcp_tools: bool = True
     use_raw_api: bool = True
+    default_model: str = DEFAULT_MODEL  # Default main/local model for chat requests
     agentic_endpoint_url: str = OLLAMA_AGENTIC_BASE_URL  # Routing: background tooling endpoint (11435)
     agentic_model: str = DEFAULT_AGENTIC_MODEL  # Model for background tool execution
     agentic_policy: str = "all_tooling"  # "all_tooling" | "heavy_only" (which tools trigger background stage)
@@ -835,6 +893,60 @@ def normalize_model_name(model: str) -> str:
     }:
         return DEFAULT_MODEL
     return cleaned
+
+
+def should_dispatch_background_stage(
+    *,
+    message: str,
+    use_search: bool,
+    use_gml_docs: bool,
+    use_ps_docs: bool,
+    use_file_tools: bool,
+    use_code_interpreter: bool,
+    use_powershell: bool,
+    use_mcp_tools: bool,
+) -> tuple[bool, str]:
+    """Return (should_dispatch, reason) for background helper stage.
+
+    Goal: avoid spinning up helper/background passes for low-intent small-talk
+    while preserving tool-assisted flows for technical/problem-solving prompts.
+    """
+    text = (message or "").strip()
+    if not text:
+        return False, "empty prompt"
+
+    if len(text) <= 64 and SMALLTALK_RE.match(text):
+        return False, "simple conversational prompt"
+
+    # Early veto: pure write/save-to-path requests.
+    # Background helpers are read-only and provide no research value for simple save tasks.
+    if WRITE_ONLY_RE.search(text):
+        return False, "write-only request (no background research needed)"
+
+    # Execution tools: require actual execution intent in the message, not just
+    # that the tool type is globally enabled.
+    if use_code_interpreter and EXECUTION_INTENT_RE.search(text):
+        return True, "code execution intent detected"
+    # PowerShell: require BOTH a PS keyword AND an execution verb to avoid false positives
+    # on messages that merely mention .ps1 files in passing (e.g. "save to /path/foo.ps1").
+    if use_powershell and POWERSHELL_INTENT_RE.search(text) and EXECUTION_INTENT_RE.search(text):
+        return True, "powershell execution intent detected"
+
+    # File/codebase: only worth pre-reading for substantive requests.
+    # Short messages (e.g. "save this", "write that") are pure write ops even if file_tools is on.
+    if (use_file_tools or use_mcp_tools) and FILE_INTENT_RE.search(text) and len(text) >= 60:
+        return True, "file/codebase intent detected"
+
+    if use_gml_docs and GML_INTENT_RE.search(text):
+        return True, "gml intent detected"
+
+    if use_ps_docs and POWERSHELL_INTENT_RE.search(text):
+        return True, "powershell intent detected"
+
+    if use_search and SEARCH_INTENT_RE.search(text):
+        return True, "search intent detected"
+
+    return False, "no helper intent detected"
 
 
 def _clip_editor_context(text: str, limit: int) -> tuple[str, bool]:
@@ -1979,6 +2091,66 @@ def get_brave_api_key() -> str:
     return os.environ.get("BRAVE_API_KEY") or load_config().get("brave_api_key", "")
 
 
+def get_openai_api_key() -> str:
+    """Return OpenAI API key from environment only (loaded from .env at startup)."""
+    return os.environ.get("OPENAI_API_KEY", "")
+
+
+def get_default_local_model() -> str:
+    """Return default local chat model (env default overridable via config)."""
+    cfg = load_config()
+    model = str(cfg.get("default_model", DEFAULT_MODEL)).strip()
+    if not model:
+        model = DEFAULT_MODEL
+    return normalize_model_name(model)
+
+
+def save_default_local_model(model: str) -> str:
+    """Persist default local chat model to config.json and return normalized value."""
+    normalized = normalize_model_name(model)
+    cfg = load_config()
+    cfg["default_model"] = normalized
+    save_config(cfg)
+    return normalized
+
+
+def get_llm_provider_config() -> dict:
+    """Load LLM provider config from config.json."""
+    cfg = load_config()
+    saved = cfg.get("llm_provider", {}) if isinstance(cfg, dict) else {}
+
+    provider = str(saved.get("provider", "local")).strip().lower()
+    if provider not in {"local", "openai"}:
+        provider = "local"
+
+    openai_model = str(saved.get("openai_model", DEFAULT_OPENAI_MODEL)).strip()
+    if not openai_model:
+        openai_model = DEFAULT_OPENAI_MODEL
+
+    return {
+        "provider": provider,
+        "openai_model": openai_model,
+    }
+
+
+def save_llm_provider_config(provider_config: dict) -> None:
+    """Persist LLM provider config to config.json."""
+    cfg = load_config()
+    provider = str(provider_config.get("provider", "local")).strip().lower()
+    if provider not in {"local", "openai"}:
+        provider = "local"
+
+    openai_model = str(provider_config.get("openai_model", DEFAULT_OPENAI_MODEL)).strip()
+    if not openai_model:
+        openai_model = DEFAULT_OPENAI_MODEL
+
+    cfg["llm_provider"] = {
+        "provider": provider,
+        "openai_model": openai_model,
+    }
+    save_config(cfg)
+
+
 def get_global_tool_toggles() -> dict:
     cfg = load_config()
     saved = cfg.get("global_tool_toggles", {}) if isinstance(cfg, dict) else {}
@@ -2023,6 +2195,40 @@ async def is_ollama_endpoint_running(health_url: str, timeout_seconds: float = 1
                 return resp.status == 200
     except Exception:
         return False
+
+
+async def select_available_helper_endpoints(
+    endpoint_urls: list[str],
+    timeout_seconds: float = 1.5,
+) -> list[str]:
+    """Return reachable helper endpoints in preferred order."""
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for url in endpoint_urls:
+        base = str(url or "").strip().rstrip("/")
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        normalized.append(base)
+
+    if not normalized:
+        return []
+
+    checks = await asyncio.gather(
+        *[
+            is_ollama_endpoint_running(f"{base}/api/tags", timeout_seconds=timeout_seconds)
+            for base in normalized
+        ],
+        return_exceptions=True,
+    )
+
+    available: list[str] = []
+    for base, result in zip(normalized, checks):
+        if isinstance(result, Exception):
+            continue
+        if result:
+            available.append(base)
+    return available
 
 
 def get_model_routing_config() -> dict:
@@ -3072,7 +3278,11 @@ async def admin_update_persona(
 async def get_admin_global_tooling(_: dict = Depends(require_admin)):
     tooling = get_global_tool_toggles()
     routing = get_model_routing_config()
-    return {**tooling, **routing}
+    return {
+        **tooling,
+        **routing,
+        "default_model": get_default_local_model(),
+    }
 
 
 @app.post("/api/admin/global-tooling")
@@ -3090,6 +3300,8 @@ async def update_admin_global_tooling(
         "use_raw_api": True,
     }
     save_global_tool_toggles(payload)
+
+    default_model = save_default_local_model(body.default_model)
     
     # Save routing config for dual-endpoint setup
     routing_payload = {
@@ -3102,6 +3314,7 @@ async def update_admin_global_tooling(
     return {
         "ok": True,
         **payload,
+        "default_model": default_model,
         **routing_payload,
     }
 
@@ -3201,6 +3414,13 @@ async def get_messages(conv_id: str, current_user: dict = Depends(get_current_us
 async def get_settings(_: dict = Depends(get_current_user)):
     key = get_brave_api_key()
     masked = (key[:4] + "..." + key[-4:]) if len(key) > 8 else ("*" * len(key) if key else "")
+    openai_key = get_openai_api_key()
+    openai_masked = (
+        (openai_key[:4] + "..." + openai_key[-4:])
+        if len(openai_key) > 8
+        else ("*" * len(openai_key) if openai_key else "")
+    )
+    llm_provider = get_llm_provider_config()
     gml_index = await ensure_gml_index_loaded()
     ps_index = await ensure_ps_index_loaded()
 
@@ -3220,6 +3440,13 @@ async def get_settings(_: dict = Depends(get_current_user)):
     return {
         "brave_api_key_set": bool(key),
         "brave_api_key_masked": masked,
+        "openai_api_key_set": bool(openai_key),
+        "openai_api_key_masked": openai_masked,
+        "openai_api_key_source": "env",
+        "default_local_model": get_default_local_model(),
+        "llm_provider": llm_provider,
+        "openai_model_options": OPENAI_MODEL_OPTIONS,
+        "openai_base_url": OPENAI_BASE_URL,
         "global_tool_toggles": get_global_tool_toggles(),
         "model_routing": routing_config,
         "chat_endpoint_url": OLLAMA_BASE_URL,
@@ -3344,9 +3571,35 @@ async def powershell_status(_: dict = Depends(get_current_user)):
 @app.post("/api/settings")
 async def update_settings(body: SettingsUpdate, _: dict = Depends(get_current_user)):
     cfg = load_config()
-    cfg["brave_api_key"] = body.brave_api_key.strip()
+
+    if body.brave_api_key is not None:
+        cfg["brave_api_key"] = body.brave_api_key.strip()
+
+    # Security: OpenAI API key is env-only and must not be persisted to config.json.
+    cfg.pop("openai_api_key", None)
+
+    current_llm_provider = get_llm_provider_config()
+    next_provider = body.llm_provider if body.llm_provider is not None else current_llm_provider["provider"]
+    next_openai_model = body.openai_model if body.openai_model is not None else current_llm_provider["openai_model"]
+
+    next_provider = str(next_provider or "local").strip().lower()
+    if next_provider not in {"local", "openai"}:
+        next_provider = "local"
+
+    next_openai_model = str(next_openai_model or DEFAULT_OPENAI_MODEL).strip()
+    if not next_openai_model:
+        next_openai_model = DEFAULT_OPENAI_MODEL
+
+    cfg["llm_provider"] = {
+        "provider": next_provider,
+        "openai_model": next_openai_model,
+    }
+
     save_config(cfg)
-    return {"ok": True}
+    return {
+        "ok": True,
+        "llm_provider": cfg["llm_provider"],
+    }
 
 
 @app.post("/api/retrieval/docs/query")
@@ -3613,7 +3866,20 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
         use_mcp_tools,
     ])
 
-    requested_model = normalize_model_name(req.model)
+    provider_config = get_llm_provider_config()
+    requested_provider = str(req.model_provider or provider_config.get("provider", "local")).strip().lower()
+    if requested_provider not in {"local", "openai"}:
+        requested_provider = "local"
+
+    default_local_model = get_default_local_model()
+
+    if requested_provider == "openai":
+        fallback_openai_model = provider_config.get("openai_model", DEFAULT_OPENAI_MODEL)
+        requested_model = str(req.model or fallback_openai_model).strip() or DEFAULT_OPENAI_MODEL
+    else:
+        requested_model = normalize_model_name(req.model or default_local_model)
+
+    openai_api_key = get_openai_api_key()
 
     async def event_stream() -> AsyncGenerator[str, None]:
         stream_id = uuid.uuid4().hex[:8]
@@ -3626,11 +3892,12 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             ps_mode=ps_mode if use_powershell else "off",
         )
         log.info(
-            "chat[%s] start user=%s conv=%s surface=%s model=%s toggles={search:%s,gml:%s,ps:%s,file:%s,code:%s,ps_exec:%s,mcp:%s} workspace=%s file=%s",
+            "chat[%s] start user=%s conv=%s surface=%s provider=%s model=%s toggles={search:%s,gml:%s,ps:%s,file:%s,code:%s,ps_exec:%s,mcp:%s} workspace=%s file=%s",
             stream_id,
             current_user.get("id"),
             req.conversation_id,
             req.surface,
+            requested_provider,
             requested_model,
             req.use_search,
             use_gml_docs,
@@ -3674,17 +3941,26 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             payload.update(extra)
             return payload
 
-        yield _sse(_status_payload("endpoint_check", "running", f"Checking chat endpoint {OLLAMA_BASE_URL}"))
-        if not await ensure_ollama_running(wait_seconds=6):
-            detail = (
-                f"Ollama is not available at {OLLAMA_BASE_URL}."
-                if not OLLAMA_IS_LOCAL
-                else f"Ollama is not available at {OLLAMA_BASE_URL} and auto-start failed. Start it with ollama serve."
-            )
-            yield _sse(_status_payload("endpoint_check", "error", detail))
-            yield _sse({"type": "error", "error_type": "connection_error", "message": detail})
-            return
-        yield _sse(_status_payload("endpoint_check", "done", "Chat endpoint is online"))
+        if requested_provider == "openai":
+            yield _sse(_status_payload("endpoint_check", "running", f"Using OpenAI endpoint {OPENAI_BASE_URL}"))
+            if not openai_api_key:
+                detail = "OpenAI mode requires OPENAI_API_KEY in your .env (loaded at startup)."
+                yield _sse(_status_payload("endpoint_check", "error", detail))
+                yield _sse({"type": "error", "error_type": "auth_error", "message": detail})
+                return
+            yield _sse(_status_payload("endpoint_check", "done", "OpenAI key detected"))
+        else:
+            yield _sse(_status_payload("endpoint_check", "running", f"Checking chat endpoint {OLLAMA_BASE_URL}"))
+            if not await ensure_ollama_running(wait_seconds=6):
+                detail = (
+                    f"Ollama is not available at {OLLAMA_BASE_URL}."
+                    if not OLLAMA_IS_LOCAL
+                    else f"Ollama is not available at {OLLAMA_BASE_URL} and auto-start failed. Start it with ollama serve."
+                )
+                yield _sse(_status_payload("endpoint_check", "error", detail))
+                yield _sse({"type": "error", "error_type": "connection_error", "message": detail})
+                return
+            yield _sse(_status_payload("endpoint_check", "done", "Chat endpoint is online"))
 
         yield _sse(_status_payload("request_setup", "running", "Preparing request context"))
 
@@ -3821,7 +4097,7 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
         else:
             working_msgs = non_system_msgs
 
-        def _build_agent_function_list(include_mcp_tools: bool = True) -> list:
+        def _build_agent_function_list(include_mcp_tools: bool = True, stage: str = "main") -> list:
             """Build Qwen-Agent function_list based on enabled features.
 
             Strategy: when MCP is active, filesystem operations go through
@@ -3832,20 +4108,32 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             used instead.
             """
             tools: list = []
+            stage_mode = (stage or "main").strip().lower()
+            is_background_stage = stage_mode == "background"
             # Web search — always local (Brave API, no MCP equivalent)
-            if req.use_search:
+            if req.use_search and not is_background_stage:
                 tools.append("web_search")
             # Filesystem tools — native only when MCP is disabled
             if use_file_tools and not use_mcp_tools:
-                tools.extend([
-                    "read_file",
-                    "write_file",
-                    "replace_in_file",
-                    "list_dir",
-                    "search_files",
-                    "grep_search",
-                    "create_directory",
-                ])
+                if is_background_stage:
+                    # Keep helper stage read-only to avoid duplicated side effects
+                    # when running multiple background workers in parallel.
+                    tools.extend([
+                        "read_file",
+                        "list_dir",
+                        "search_files",
+                        "grep_search",
+                    ])
+                else:
+                    tools.extend([
+                        "read_file",
+                        "write_file",
+                        "replace_in_file",
+                        "list_dir",
+                        "search_files",
+                        "grep_search",
+                        "create_directory",
+                    ])
             # Local RAG doc search tools — always local (ChromaDB, no MCP equivalent)
             if use_gml_docs:
                 tools.append("gml_docs_search")
@@ -3856,13 +4144,13 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 tools.append("codebase_folder_overview")
                 tools.append("codebase_index_search")
             # Code interpreter — always local (Docker sandbox, no MCP equivalent)
-            if use_code_interpreter and code_interpreter.is_available():
+            if (not is_background_stage) and use_code_interpreter and code_interpreter.is_available():
                 tools.append("code_interpreter")
             # PowerShell — always local (native or Docker, no MCP equivalent)
-            if use_powershell and is_ps_available(ps_mode):
+            if (not is_background_stage) and use_powershell and is_ps_available(ps_mode):
                 tools.append("run_powershell")
             # MCP servers — filesystem, memory, sqlite all handled here
-            if include_mcp_tools and use_mcp_tools:
+            if include_mcp_tools and use_mcp_tools and not is_background_stage:
                 try:
                     user_mcp_config = _load_user_mcp_config(
                         current_user.get("mcp_config", ""),
@@ -4146,8 +4434,152 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 return compact[:180] + "..."
             return compact
 
-        def _make_agent(include_mcp_tools: bool):
-            function_list = _build_agent_function_list(include_mcp_tools=include_mcp_tools)
+        def _normalize_tool_parameters(parameters) -> dict:
+            if isinstance(parameters, dict):
+                schema = dict(parameters)
+            elif isinstance(parameters, list):
+                props: dict[str, dict] = {}
+                required: list[str] = []
+                for item in parameters:
+                    if not isinstance(item, dict):
+                        continue
+                    param_name = str(item.get("name") or "").strip()
+                    if not param_name:
+                        continue
+                    raw_type = str(item.get("type") or "string").strip().lower()
+                    if raw_type in {"str"}:
+                        raw_type = "string"
+                    elif raw_type in {"int"}:
+                        raw_type = "integer"
+                    elif raw_type in {"float"}:
+                        raw_type = "number"
+                    elif raw_type in {"bool"}:
+                        raw_type = "boolean"
+                    elif raw_type in {"list"}:
+                        raw_type = "array"
+                    elif raw_type in {"dict"}:
+                        raw_type = "object"
+                    if raw_type not in {"string", "integer", "number", "boolean", "array", "object"}:
+                        raw_type = "string"
+
+                    prop: dict[str, object] = {
+                        "type": raw_type,
+                        "description": str(item.get("description") or ""),
+                    }
+                    enum_values = item.get("enum")
+                    if isinstance(enum_values, list) and enum_values:
+                        prop["enum"] = enum_values
+                    props[param_name] = prop
+                    if bool(item.get("required")):
+                        required.append(param_name)
+
+                schema = {
+                    "type": "object",
+                    "properties": props,
+                    "required": required,
+                }
+            else:
+                schema = {"type": "object", "properties": {}, "required": []}
+
+            if schema.get("type") != "object":
+                schema = {
+                    "type": "object",
+                    "properties": schema.get("properties", {}) if isinstance(schema.get("properties"), dict) else {},
+                    "required": schema.get("required", []) if isinstance(schema.get("required"), list) else [],
+                }
+            if not isinstance(schema.get("properties"), dict):
+                schema["properties"] = {}
+            if not isinstance(schema.get("required"), list):
+                schema["required"] = []
+            return schema
+
+        def _extract_openai_message_text(content_obj) -> str:
+            if isinstance(content_obj, str):
+                return content_obj
+            if isinstance(content_obj, list):
+                chunks: list[str] = []
+                for part in content_obj:
+                    if isinstance(part, str):
+                        if part:
+                            chunks.append(part)
+                        continue
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = str(part.get("type") or "").strip().lower()
+                    if part_type in {"text", "output_text"}:
+                        text_value = part.get("text")
+                        if isinstance(text_value, str) and text_value:
+                            chunks.append(text_value)
+                        elif isinstance(text_value, dict):
+                            nested = text_value.get("value")
+                            if isinstance(nested, str) and nested:
+                                chunks.append(nested)
+                return "".join(chunks)
+            if content_obj is None:
+                return ""
+            return str(content_obj)
+
+        async def _call_openai_chat_completion(messages_payload: list[dict], tool_schemas: list[dict] | None) -> dict:
+            payload: dict[str, object] = {
+                "model": requested_model,
+                "messages": messages_payload,
+            }
+            if tool_schemas:
+                payload["tools"] = tool_schemas
+                payload["tool_choice"] = "auto"
+
+            headers = {
+                "Authorization": f"Bearer {openai_api_key}",
+                "Content-Type": "application/json",
+            }
+            timeout = aiohttp.ClientTimeout(total=180)
+            url = f"{OPENAI_BASE_URL}/chat/completions"
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    raw_text = await response.text()
+                    if response.status >= 400:
+                        raise RuntimeError(
+                            f"OpenAI chat/completions error {response.status}: {raw_text[:600]}"
+                        )
+                    try:
+                        return json.loads(raw_text)
+                    except Exception as exc:
+                        raise RuntimeError(f"Invalid OpenAI JSON response: {exc}") from exc
+
+        async def _execute_named_tool_call(
+            tool_name: str,
+            args_obj: dict,
+            qwen_tool_registry: dict,
+            mcp_tool_names: set[str],
+        ) -> str:
+            name = str(tool_name or "").strip()
+            if not name:
+                return "[Error: tool name is empty]"
+
+            if name in mcp_tool_names:
+                try:
+                    from agent_tools import mcp_registry  # noqa: PLC0415
+
+                    return await asyncio.to_thread(mcp_registry.call_tool, name, args_obj)
+                except Exception as exc:
+                    return f"[Error: MCP tool '{name}' failed: {exc}]"
+
+            tool_entry = qwen_tool_registry.get(name)
+            if tool_entry is not None:
+                try:
+                    tool_instance = tool_entry() if isinstance(tool_entry, type) else tool_entry
+                    params_payload = json.dumps(args_obj, ensure_ascii=False)
+                    return await asyncio.to_thread(tool_instance.call, params_payload)
+                except Exception as exc:
+                    return f"[Error: tool '{name}' failed: {exc}]"
+
+            handled, fallback_content = await asyncio.to_thread(_execute_literal_tool_call, name, args_obj)
+            if handled:
+                return fallback_content
+            return f"[Error: Unsupported tool '{name}']"
+
+        def _make_agent(include_mcp_tools: bool, stage: str = "main"):
+            function_list = _build_agent_function_list(include_mcp_tools=include_mcp_tools, stage=stage)
             log.info("chat[%s] function_list=%s", stream_id, _build_function_list_labels(function_list))
             return Assistant(
                 function_list=function_list,
@@ -4171,49 +4603,59 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
             use_raw_api = True
             fncall_prompt_type = (os.getenv("QWEN_AGENT_FNCALL_PROMPT_TYPE", "nous") or "").strip()
 
-            generate_cfg: dict = {"use_raw_api": use_raw_api}
-            # fncall_prompt_type is for qwen-agent prompt-injection mode only.
-            # In native raw-api mode, providing this can increase protocol drift
-            # (model emitting literal <function=...> text instead of tool_calls).
-            if (not use_raw_api) and fncall_prompt_type:
-                generate_cfg["fncall_prompt_type"] = fncall_prompt_type
+            def _build_generate_cfg(*, raw_api_mode: bool) -> dict:
+                cfg: dict = {"use_raw_api": raw_api_mode}
+                # fncall_prompt_type is for qwen-agent prompt-injection mode only.
+                # In native raw-api mode, providing this can increase protocol drift
+                # (model emitting literal <function=...> text instead of tool_calls).
+                if (not raw_api_mode) and fncall_prompt_type:
+                    cfg["fncall_prompt_type"] = fncall_prompt_type
 
-            # OpenAI-compatible clients reject unknown top-level args like `think`.
-            # Pass reasoning toggle via extra_body for backends (e.g. Ollama) that support it.
-            extra_body = {"options": {"num_ctx": OLLAMA_NUM_CTX}}
-            if req.think is not None:
-                extra_body["think"] = bool(req.think)
-            generate_cfg["extra_body"] = extra_body
+                # OpenAI mode must avoid backend-specific payload fields such as
+                # Ollama's `options`/`think` in `extra_body`.
+                if requested_provider != "openai":
+                    extra_body = {"options": {"num_ctx": OLLAMA_NUM_CTX}}
+                    if req.think is not None:
+                        extra_body["think"] = bool(req.think)
+                    cfg["extra_body"] = extra_body
+                return cfg
+
+            generate_cfg = _build_generate_cfg(raw_api_mode=use_raw_api)
             log.info(
-                "chat[%s] llm generate_cfg use_raw_api=%s fncall_prompt_type=%r think=%s num_ctx=%s",
+                "chat[%s] llm generate_cfg use_raw_api=%s fncall_prompt_type=%r provider=%s think=%s num_ctx=%s extra_body=%s",
                 stream_id,
                 use_raw_api,
                 fncall_prompt_type,
+                requested_provider,
                 req.think,
                 OLLAMA_NUM_CTX,
+                "yes" if "extra_body" in generate_cfg else "no",
             )
 
             llm_cfg = {
                 "model": requested_model,
-                "model_server": OLLAMA_OPENAI_URL,
-                "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
+                "model_server": OPENAI_BASE_URL if requested_provider == "openai" else OLLAMA_OPENAI_URL,
+                "api_key": openai_api_key if requested_provider == "openai" else "EMPTY",
                 "generate_cfg": generate_cfg,
             }
 
             include_mcp_for_run = True
-            try:
-                agent = _make_agent(include_mcp_tools=include_mcp_for_run)
-            except Exception as exc:
-                # Fail-open: if MCP startup fails (missing launcher, server boot failure, etc.),
-                # retry once without MCP so chat remains available.
-                if use_mcp_tools:
-                    log.warning("chat[%s] assistant init with MCP failed; retrying without MCP tools: %s", stream_id, exc)
-                    include_mcp_for_run = False
-                    agent = _make_agent(include_mcp_tools=False)
-                else:
-                    raise
+            retried_prompt_injection_for_openai = False
+            agent = None
+            if requested_provider != "openai":
+                try:
+                    agent = _make_agent(include_mcp_tools=include_mcp_for_run, stage="main")
+                except Exception as exc:
+                    # Fail-open: if MCP startup fails (missing launcher, server boot failure, etc.),
+                    # retry once without MCP so chat remains available.
+                    if use_mcp_tools:
+                        log.warning("chat[%s] assistant init with MCP failed; retrying without MCP tools: %s", stream_id, exc)
+                        include_mcp_for_run = False
+                        agent = _make_agent(include_mcp_tools=False, stage="main")
+                    else:
+                        raise
 
-            retry_without_mcp_on_eof = bool(use_mcp_tools and include_mcp_for_run)
+            retry_without_mcp_on_eof = bool(requested_provider != "openai" and use_mcp_tools and include_mcp_for_run)
 
             # Two-stage pipeline: background reasoning + tool execution on agentic endpoint (11435)
             # Strategy: detect heavy tooling, evaluate routing policy, conditionally run worker stage
@@ -4223,16 +4665,31 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 use_powershell,
                 use_mcp_tools,
             ])
+            background_intent, background_intent_reason = should_dispatch_background_stage(
+                message=req.message,
+                use_search=req.use_search,
+                use_gml_docs=use_gml_docs,
+                use_ps_docs=use_ps_docs,
+                use_file_tools=use_file_tools,
+                use_code_interpreter=use_code_interpreter,
+                use_powershell=use_powershell,
+                use_mcp_tools=use_mcp_tools,
+            )
             routing_config = get_model_routing_config()
             agentic_policy = routing_config.get("agentic_policy", "all_tooling")
             agentic_endpoint_base_url = routing_config.get("agentic_endpoint_url", OLLAMA_AGENTIC_BASE_URL).rstrip("/")
             agentic_endpoint_model = normalize_model_name(
                 req.agentic_model or routing_config.get("agentic_model", DEFAULT_AGENTIC_MODEL)
             )
-            agentic_health_url = f"{agentic_endpoint_base_url}/api/tags"
-            agentic_endpoint_online = await is_ollama_endpoint_running(agentic_health_url)
+            helper_candidates = [agentic_endpoint_base_url]
+            if requested_provider == "openai":
+                # In OpenAI mode, keep both local GPUs available for helper work
+                # and prefer 11434 first.
+                helper_candidates = [OLLAMA_BASE_URL, agentic_endpoint_base_url]
+            available_helper_endpoints = await select_available_helper_endpoints(helper_candidates, timeout_seconds=1.5)
             main_model_server = str(llm_cfg.get("model_server") or "")
-            background_model_server = f"{agentic_endpoint_base_url}/v1"
+            background_model_server = f"{available_helper_endpoints[0]}/v1" if available_helper_endpoints else f"{agentic_endpoint_base_url}/v1"
+            background_server_label = ", ".join(available_helper_endpoints) if available_helper_endpoints else "offline"
 
             yield _sse(
                 _status_payload(
@@ -4240,121 +4697,302 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     "done",
                     (
                         f"Routing: main {requested_model} -> {main_model_server}; "
-                        f"background {agentic_endpoint_model} -> {background_model_server} "
+                        f"background {agentic_endpoint_model} -> {background_server_label} "
                         f"(policy={agentic_policy})"
                     ),
                 )
             )
             log.info(
-                "chat[%s] routing summary main_model=%s main_server=%s background_model=%s background_server=%s policy=%s",
+                "chat[%s] routing summary main_model=%s main_server=%s background_model=%s background_server=%s policy=%s intent=%s reason=%s",
                 stream_id,
                 requested_model,
                 main_model_server,
                 agentic_endpoint_model,
-                background_model_server,
+                background_server_label,
                 agentic_policy,
+                background_intent,
+                background_intent_reason,
             )
 
             # Determine if background stage should run
             run_background_stage = (
                 use_any_tooling
+                and background_intent
                 and (
                     agentic_policy == "all_tooling"
                     or (agentic_policy == "heavy_only" and heavy_tooling_requested)
                 )
-                and agentic_endpoint_online
+                and bool(available_helper_endpoints)
             )
 
             if run_background_stage:
-                yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'running', 'message': f'Background tool stage running on {agentic_endpoint_model}'})}\n\n"
+                helper_targets = list(available_helper_endpoints)
+                if requested_provider == "openai":
+                    helper_targets = helper_targets[:2]
+                else:
+                    helper_targets = helper_targets[:1]
+
+                yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'running', 'message': f'Background helper stage running on {len(helper_targets)} local endpoint(s): {', '.join(helper_targets)}'})}\n\n"
                 log.info(
-                    "chat[%s] triggering background stage: heavy_tooling=%s policy=%s endpoint=%s model=%s",
+                    "chat[%s] triggering background stage: heavy_tooling=%s policy=%s endpoints=%s model=%s",
                     stream_id,
                     heavy_tooling_requested,
                     agentic_policy,
-                    agentic_endpoint_base_url,
+                    helper_targets,
                     agentic_endpoint_model,
                 )
                 try:
-                    # Build worker agent for background stage (no web search, no MCP to keep it lean)
-                    worker_llm_cfg = {
-                        "model": agentic_endpoint_model,
-                        "model_server": f"{agentic_endpoint_base_url}/v1",
-                        "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
-                        "generate_cfg": {
-                            "use_raw_api": use_raw_api,
-                            "extra_body": {
-                                "think": True,
-                                "options": {"num_ctx": OLLAMA_NUM_CTX},
+                    def _endpoint_port_label(endpoint_url: str) -> str:
+                        parsed = urlparse(str(endpoint_url or "").strip())
+                        port = parsed.port
+                        if port is None:
+                            port = 443 if parsed.scheme == "https" else 80
+                        return str(port)
+
+                    async def _run_background_worker(endpoint_url: str, worker_index: int) -> dict:
+                        worker_llm_cfg = {
+                            "model": agentic_endpoint_model,
+                            "model_server": f"{endpoint_url}/v1",
+                            "api_key": "EMPTY",
+                            "generate_cfg": {
+                                "use_raw_api": True,
+                                "extra_body": {
+                                    "think": True,
+                                    "options": {"num_ctx": OLLAMA_NUM_CTX},
+                                },
                             },
-                        },
-                    }
-                    worker_agent = Assistant(
-                        function_list=_build_agent_function_list(include_mcp_tools=False),
-                        llm=get_chat_model(worker_llm_cfg),
-                        system_message="",
-                    )
+                        }
+                        worker_agent = Assistant(
+                            function_list=_build_agent_function_list(include_mcp_tools=False, stage="background"),
+                            llm=get_chat_model(worker_llm_cfg),
+                            system_message="",
+                        )
 
-                    # Run worker agent to extract reasoning + tool results
-                    worker_response_iter = worker_agent.run(messages=working_msgs, lang="en")
-                    worker_reasoning = ""
-                    worker_content = ""
-                    worker_tool_msgs: list[dict] = []
-                    seen_worker_tools = 0
+                        worker_response_iter = worker_agent.run(messages=working_msgs, lang="en")
+                        worker_reasoning = ""
+                        worker_content = ""
+                        worker_tool_msgs: list[dict] = []
+                        seen_worker_tools = 0
 
-                    async for packet in _iter_with_heartbeat(
-                        worker_response_iter,
-                        phase_key="background_stage",
-                        phase_label=f"Background model is thinking on {agentic_endpoint_model}",
-                    ):
-                        if packet.get("type") == "heartbeat":
-                            yield _sse(packet)
-                            continue
-                        rsp = packet.get("rsp")
-                        if not isinstance(rsp, list):
-                            continue
+                        try:
+                            async for packet in _iter_with_heartbeat(
+                                worker_response_iter,
+                                phase_key=f"background_stage_{worker_index}",
+                                phase_label=f"Background helper {worker_index} on {endpoint_url}",
+                            ):
+                                if packet.get("type") == "heartbeat":
+                                    continue
+                                rsp = packet.get("rsp")
+                                if not isinstance(rsp, list):
+                                    continue
 
-                        # Collect assistant reasoning and content
-                        for msg in rsp:
-                            if hasattr(msg, "get") and msg.get("role") == "assistant":
-                                reasoning = str(msg.get("reasoning_content") or msg.get("thinking") or "")
-                                content = str(msg.get("content") or "")
-                                if reasoning:
-                                    worker_reasoning = reasoning
-                                if content:
-                                    worker_content = content
+                                for msg in rsp:
+                                    if hasattr(msg, "get") and msg.get("role") == "assistant":
+                                        reasoning = str(msg.get("reasoning_content") or msg.get("thinking") or "")
+                                        content = str(msg.get("content") or "")
+                                        if reasoning:
+                                            worker_reasoning = reasoning
+                                        if content:
+                                            worker_content = content
 
-                        # Collect tool results from background stage
-                        tool_msgs = [
-                            m for m in rsp
-                            if hasattr(m, "get") and m.get("role") in ("function", "tool")
-                        ]
-                        if len(tool_msgs) > seen_worker_tools:
-                            for tool_msg in tool_msgs[seen_worker_tools:]:
-                                worker_tool_msgs.append(tool_msg)
-                                log.info(
-                                    "chat[%s] background tool result: name=%s",
+                                tool_msgs = [
+                                    m for m in rsp
+                                    if hasattr(m, "get") and m.get("role") in ("function", "tool")
+                                ]
+                                if len(tool_msgs) > seen_worker_tools:
+                                    for tool_msg in tool_msgs[seen_worker_tools:]:
+                                        worker_tool_msgs.append(tool_msg)
+                                        log.info(
+                                            "chat[%s] background worker=%s endpoint=%s tool=%s",
+                                            stream_id,
+                                            worker_index,
+                                            endpoint_url,
+                                            tool_msg.get("name", "unknown"),
+                                        )
+                                    seen_worker_tools = len(tool_msgs)
+                        except asyncio.CancelledError:
+                            close_fn = getattr(worker_response_iter, "close", None)
+                            if callable(close_fn):
+                                try:
+                                    await asyncio.to_thread(close_fn)
+                                except Exception:
+                                    pass
+                            raise
+
+                        return {
+                            "worker_index": worker_index,
+                            "endpoint": endpoint_url,
+                            "reasoning": worker_reasoning,
+                            "content": worker_content,
+                            "tool_msgs": worker_tool_msgs,
+                        }
+
+                    worker_tasks: dict[asyncio.Task, tuple[int, str]] = {}
+                    worker_summaries: list[dict] = []
+                    for idx, endpoint in enumerate(helper_targets, start=1):
+                        worker_key = f"background_worker_{idx}"
+                        endpoint_port = _endpoint_port_label(endpoint)
+                        yield _sse(_status_payload(
+                            worker_key,
+                            "running",
+                            f"Background helper {idx} running on endpoint {endpoint_port} ({endpoint})",
+                            worker_index=idx,
+                            endpoint=endpoint,
+                            endpoint_port=endpoint_port,
+                        ))
+                        task = asyncio.create_task(_run_background_worker(endpoint, idx))
+                        worker_tasks[task] = (idx, endpoint)
+
+                    worker_runs: list[dict | Exception] = []
+                    pending = set(worker_tasks.keys())
+                    heartbeat_count = 0
+                    workers_timed_out = False
+                    while pending:
+                        done, pending = await asyncio.wait(
+                            pending,
+                            timeout=SSE_HEARTBEAT_SECONDS,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+
+                        if not done:
+                            heartbeat_count += 1
+                            elapsed = int(heartbeat_count * SSE_HEARTBEAT_SECONDS)
+                            # Hard-cancel all remaining workers if total timeout exceeded.
+                            if elapsed >= BACKGROUND_WORKER_TIMEOUT_SECONDS:
+                                workers_timed_out = True
+                                log.warning(
+                                    "chat[%s] background workers exceeded total timeout (%ds); cancelling %d remaining",
                                     stream_id,
-                                    tool_msg.get("name", "unknown"),
+                                    BACKGROUND_WORKER_TIMEOUT_SECONDS,
+                                    len(pending),
                                 )
-                            seen_worker_tools = len(tool_msgs)
+                                for task in pending:
+                                    idx, endpoint = worker_tasks[task]
+                                    endpoint_port = _endpoint_port_label(endpoint)
+                                    task.cancel()
+                                    worker_summaries.append({
+                                        "worker": idx,
+                                        "endpoint": endpoint,
+                                        "endpoint_port": endpoint_port,
+                                        "status": "timeout",
+                                        "tools": 0,
+                                    })
+                                    yield _sse(_status_payload(
+                                        f"background_worker_{idx}",
+                                        "error",
+                                        f"Background helper {idx} cancelled after {BACKGROUND_WORKER_TIMEOUT_SECONDS}s timeout on endpoint {endpoint_port}",
+                                        worker_index=idx,
+                                        endpoint=endpoint,
+                                        endpoint_port=endpoint_port,
+                                    ))
+                                await asyncio.gather(*pending, return_exceptions=True)
+                                pending = set()
+                                break
+                            for task in pending:
+                                idx, endpoint = worker_tasks[task]
+                                endpoint_port = _endpoint_port_label(endpoint)
+                                yield _sse({
+                                    "type": "heartbeat",
+                                    "phase": f"background_worker_{idx}",
+                                    "count": heartbeat_count,
+                                    "message": f"Background helper {idx} still running on endpoint {endpoint_port} ({elapsed}s)",
+                                    "endpoint": endpoint,
+                                    "endpoint_port": endpoint_port,
+                                })
+                            continue
+
+                        for task in done:
+                            idx, endpoint = worker_tasks[task]
+                            worker_key = f"background_worker_{idx}"
+                            endpoint_port = _endpoint_port_label(endpoint)
+                            try:
+                                result = task.result()
+                                worker_runs.append(result)
+                                tool_count = len(result.get("tool_msgs") or [])
+                                worker_summaries.append({
+                                    "worker": idx,
+                                    "endpoint": endpoint,
+                                    "endpoint_port": endpoint_port,
+                                    "status": "ok",
+                                    "tools": tool_count,
+                                })
+                                yield _sse(_status_payload(
+                                    worker_key,
+                                    "done",
+                                    f"Background helper {idx} completed on endpoint {endpoint_port}",
+                                    worker_index=idx,
+                                    endpoint=endpoint,
+                                    endpoint_port=endpoint_port,
+                                    tool_count=tool_count,
+                                ))
+                            except Exception as exc:
+                                worker_runs.append(exc)
+                                worker_summaries.append({
+                                    "worker": idx,
+                                    "endpoint": endpoint,
+                                    "endpoint_port": endpoint_port,
+                                    "status": "error",
+                                    "tools": 0,
+                                    "error": str(exc)[:160],
+                                })
+                                yield _sse(_status_payload(
+                                    worker_key,
+                                    "error",
+                                    f"Background helper {idx} failed on endpoint {endpoint_port}: {exc}",
+                                    worker_index=idx,
+                                    endpoint=endpoint,
+                                    endpoint_port=endpoint_port,
+                                ))
+
+                    merged_reasoning_parts: list[str] = []
+                    merged_draft_parts: list[str] = []
+                    merged_tool_msgs: list[dict] = []
+
+                    for run_result in worker_runs:
+                        if isinstance(run_result, Exception):
+                            log.warning("chat[%s] background helper task failed: %s", stream_id, run_result)
+                            continue
+                        endpoint_label = str(run_result.get("endpoint") or "local")
+                        worker_reasoning = str(run_result.get("reasoning") or "").strip()
+                        worker_content = str(run_result.get("content") or "").strip()
+                        worker_tool_msgs = run_result.get("tool_msgs") or []
+                        if worker_reasoning:
+                            merged_reasoning_parts.append(f"[{endpoint_label}]\n{worker_reasoning}")
+                        if worker_content:
+                            compact_worker_content = worker_content
+                            if len(compact_worker_content) > 1200:
+                                compact_worker_content = compact_worker_content[:1200].rstrip() + "\n[... truncated ...]"
+                            merged_draft_parts.append(f"[{endpoint_label}]\n{compact_worker_content}")
+                        merged_tool_msgs.extend(worker_tool_msgs)
+
+                    deduped_tool_msgs: list[dict] = []
+                    dedupe_keys: set[str] = set()
+                    duplicate_tool_results = 0
+                    for tool_msg in merged_tool_msgs:
+                        tool_name = str(tool_msg.get("name", "unknown"))
+                        tool_content = str(tool_msg.get("content", ""))
+                        fingerprint = hashlib.sha256(tool_content.encode("utf-8", errors="ignore")).hexdigest()
+                        dedupe_key = f"{tool_name}:{fingerprint}"
+                        if dedupe_key in dedupe_keys:
+                            duplicate_tool_results += 1
+                            continue
+                        dedupe_keys.add(dedupe_key)
+                        deduped_tool_msgs.append(tool_msg)
+                    merged_tool_msgs = deduped_tool_msgs
 
                     # Inject background results into main stage context
-                    if worker_reasoning or worker_content or worker_tool_msgs:
+                    if merged_reasoning_parts or merged_draft_parts or merged_tool_msgs:
                         background_context_parts: list[str] = [
                             "=== Background Analysis (from lightweight reasoning model) ===",
                         ]
-                        if worker_reasoning:
-                            background_context_parts.append(f"Reasoning:\n{worker_reasoning}")
-                        if worker_content:
-                            compact_worker_content = worker_content.strip()
-                            if len(compact_worker_content) > 1200:
-                                compact_worker_content = compact_worker_content[:1200].rstrip() + "\n[... truncated ...]"
-                            background_draft_excerpt = compact_worker_content
-                            background_context_parts.append(f"Background draft:\n{compact_worker_content}")
-                        if worker_tool_msgs:
+                        if merged_reasoning_parts:
+                            background_context_parts.append("Reasoning:\n" + "\n\n".join(merged_reasoning_parts))
+                        if merged_draft_parts:
+                            background_draft_excerpt = merged_draft_parts[0]
+                            background_context_parts.append("Background draft:\n" + "\n\n".join(merged_draft_parts))
+                        if merged_tool_msgs:
                             background_context_parts.append("Tool Results:")
-                            for tool_msg in worker_tool_msgs:
+                            for tool_msg in merged_tool_msgs:
                                 tool_name = tool_msg.get("name", "unknown")
                                 tool_content = str(tool_msg.get("content", "")).strip()
                                 # Truncate extremely long tool outputs
@@ -4378,13 +5016,16 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                             })
 
                         log.info(
-                            "chat[%s] injected background context: reasoning_chars=%d tool_count=%d",
+                            "chat[%s] injected background context: workers=%d reasoning_parts=%d tool_count=%d deduped=%d",
                             stream_id,
-                            len(worker_reasoning),
-                            len(worker_tool_msgs),
+                            len(helper_targets),
+                            len(merged_reasoning_parts),
+                            len(merged_tool_msgs),
+                            duplicate_tool_results,
                         )
 
-                    yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'done', 'message': f'Background stage complete: {len(worker_tool_msgs)} tool result(s), draft_chars={len(worker_content.strip())}'})}\n\n"
+                    draft_chars = sum(len(part) for part in merged_draft_parts)
+                    yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'done', 'message': f'Background stage complete: workers={len(helper_targets)}, tool_results={len(merged_tool_msgs)}, draft_chars={draft_chars}', 'worker_summary': worker_summaries})}\n\n"
 
                 except Exception as exc:
                     log.warning(
@@ -4397,13 +5038,208 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 skip_reason = "policy/feature gating"
                 if not use_any_tooling:
                     skip_reason = "no tooling requested"
+                elif not background_intent:
+                    skip_reason = background_intent_reason
                 elif agentic_policy == "heavy_only" and not heavy_tooling_requested:
                     skip_reason = "heavy_only policy with light tooling"
-                elif not agentic_endpoint_online:
-                    skip_reason = f"agentic endpoint offline at {agentic_endpoint_base_url}"
+                elif not available_helper_endpoints:
+                    skip_reason = f"helper endpoints offline ({', '.join(helper_candidates)})"
                 yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'done', 'message': f'Background stage skipped: {skip_reason}'})}\n\n"
 
-            while True:
+            final_pass_active = requested_provider == "openai"
+            if final_pass_active:
+                yield _sse(_status_payload(
+                    "final_pass",
+                    "running",
+                    "OpenAI final pass running (tool-capable)",
+                    helpers_ran=run_background_stage,
+                ))
+
+            if requested_provider == "openai":
+                qwen_tool_registry: dict = {}
+                mcp_tool_names: set[str] = set()
+                openai_tool_schemas: list[dict] = []
+                seen_openai_tools: set[str] = set()
+
+                try:
+                    from qwen_agent.tools.base import TOOL_REGISTRY as _QWEN_TOOL_REGISTRY  # noqa: PLC0415
+
+                    qwen_tool_registry = _QWEN_TOOL_REGISTRY
+                except Exception as exc:
+                    log.warning("chat[%s] qwen tool registry unavailable for OpenAI tool loop: %s", stream_id, exc)
+
+                if use_any_tooling:
+                    function_list = _build_agent_function_list(include_mcp_tools=include_mcp_for_run, stage="main")
+                    for item in function_list:
+                        if isinstance(item, str):
+                            tool_name = str(item or "").strip()
+                            if not tool_name or tool_name in seen_openai_tools:
+                                continue
+                            tool_entry = qwen_tool_registry.get(tool_name)
+                            if tool_entry is None:
+                                log.warning("chat[%s] OpenAI loop missing tool registry entry for %s", stream_id, tool_name)
+                                continue
+                            try:
+                                if isinstance(tool_entry, type):
+                                    description = str(getattr(tool_entry, "description", "") or "")
+                                    parameters = getattr(tool_entry, "parameters", {})
+                                else:
+                                    description = str(getattr(tool_entry, "description", "") or "")
+                                    parameters = getattr(tool_entry, "parameters", {})
+                                    if not parameters and hasattr(tool_entry, "__class__"):
+                                        parameters = getattr(tool_entry.__class__, "parameters", {})
+                                openai_tool_schemas.append({
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "description": description,
+                                        "parameters": _normalize_tool_parameters(parameters),
+                                    },
+                                })
+                                seen_openai_tools.add(tool_name)
+                            except Exception as exc:
+                                log.warning("chat[%s] failed to build schema for tool %s: %s", stream_id, tool_name, exc)
+                        elif isinstance(item, dict):
+                            try:
+                                from agent_tools import mcp_registry  # noqa: PLC0415
+
+                                mcp_registry.initialize(item)
+                                for schema in mcp_registry.get_schemas():
+                                    fn = schema.get("function", {}) if isinstance(schema, dict) else {}
+                                    mcp_name = str(fn.get("name") or "").strip()
+                                    if not mcp_name or mcp_name in seen_openai_tools:
+                                        continue
+                                    openai_tool_schemas.append(schema)
+                                    mcp_tool_names.add(mcp_name)
+                                    seen_openai_tools.add(mcp_name)
+                            except Exception as exc:
+                                log.warning("chat[%s] failed to initialise MCP schemas for OpenAI loop: %s", stream_id, exc)
+
+                openai_msgs = [
+                    dict(m) if isinstance(m, dict) else m
+                    for m in working_msgs
+                ]
+                openai_turn_limit = 10
+
+                yield _sse(
+                    _status_payload(
+                        "main_stage",
+                        "running",
+                        f"OpenAI main stage running with native tools ({len(openai_tool_schemas)} available)",
+                    )
+                )
+
+                for openai_turn in range(1, openai_turn_limit + 1):
+                    response_data = await _call_openai_chat_completion(
+                        openai_msgs,
+                        openai_tool_schemas if openai_tool_schemas else None,
+                    )
+                    choices = response_data.get("choices") or []
+                    if not choices or not isinstance(choices[0], dict):
+                        raise RuntimeError("OpenAI response did not include choices[0]")
+
+                    assistant_message = choices[0].get("message")
+                    if not isinstance(assistant_message, dict):
+                        raise RuntimeError("OpenAI response choices[0].message is missing")
+
+                    assistant_content_obj = assistant_message.get("content")
+                    assistant_content_text = _extract_openai_message_text(assistant_content_obj)
+                    assistant_tool_calls = assistant_message.get("tool_calls")
+                    if not isinstance(assistant_tool_calls, list):
+                        assistant_tool_calls = []
+
+                    if assistant_content_text:
+                        if assistant_content_text.startswith(final_content):
+                            content_delta = assistant_content_text[len(final_content):]
+                        else:
+                            content_delta = assistant_content_text
+                        if content_delta:
+                            yield f"data: {json.dumps({'type': 'content', 'delta': content_delta})}\n\n"
+                        final_content = assistant_content_text
+
+                    assistant_history_msg: dict[str, object] = {"role": "assistant"}
+                    assistant_history_msg["content"] = assistant_content_text or ""
+                    if assistant_tool_calls:
+                        assistant_history_msg["tool_calls"] = assistant_tool_calls
+                    openai_msgs.append(assistant_history_msg)
+
+                    if not assistant_tool_calls:
+                        break
+
+                    for call_index, tool_call in enumerate(assistant_tool_calls, start=1):
+                        if not isinstance(tool_call, dict):
+                            continue
+                        tool_call_id = str(tool_call.get("id") or f"call_{openai_turn}_{call_index}")
+                        function_info = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                        tool_name = str(function_info.get("name") or "").strip()
+                        args_raw = function_info.get("arguments", "{}")
+                        if isinstance(args_raw, str):
+                            try:
+                                args_obj = json.loads(args_raw) if args_raw.strip() else {}
+                            except Exception:
+                                args_obj = {"raw": args_raw}
+                        elif isinstance(args_raw, dict):
+                            args_obj = args_raw
+                        else:
+                            args_obj = {}
+
+                        if not tool_name:
+                            tool_name = "unknown_tool"
+
+                        dedupe_key = tool_call_id or f"{tool_name}:{json.dumps(args_obj, sort_keys=True, ensure_ascii=False)}"
+                        if dedupe_key not in seen_tool_call_ids:
+                            seen_tool_call_ids.add(dedupe_key)
+                            yield f"data: {json.dumps({'type': 'tool_call', 'name': tool_name, 'args': args_obj})}\n\n"
+
+                        tool_output = await _execute_named_tool_call(
+                            tool_name,
+                            args_obj,
+                            qwen_tool_registry,
+                            mcp_tool_names,
+                        )
+                        tool_ok = not bool(TOOL_ERROR_RE.search(str(tool_output or "")))
+                        tool_summary = _compact_tool_summary(tool_name, str(tool_output or ""), tool_ok)
+                        tool_result_summaries.append(f"{tool_name}: {tool_summary}")
+                        yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'ok': tool_ok, 'summary': tool_summary})}\n\n"
+
+                        tools_called += 1
+                        if tool_name == "web_search":
+                            searches_done += 1
+                        if tool_name == "code_interpreter":
+                            code_runs += 1
+                        elif tool_name == "run_powershell":
+                            powershell_runs += 1
+                        elif tool_name == "read_file":
+                            file_reads += 1
+                        elif tool_name in ("write_file", "replace_in_file", "create_directory"):
+                            file_writes += 1
+                        if tool_name in ("write_file", "replace_in_file"):
+                            file_content_writes += 1
+                        elif tool_name == "gml_docs_search":
+                            gml_snippet_count += len(re.findall(r"^\[\d+\]", str(tool_output or ""), flags=re.MULTILINE))
+                        elif tool_name == "ps_docs_search":
+                            ps_snippet_count += len(re.findall(r"^\[\d+\]", str(tool_output or ""), flags=re.MULTILINE))
+
+                        openai_msgs.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call_id,
+                                "name": tool_name,
+                                "content": str(tool_output or ""),
+                            }
+                        )
+                else:
+                    yield _sse(
+                        _status_payload(
+                            "main_stage",
+                            "error",
+                            f"OpenAI tool loop reached turn limit ({openai_turn_limit}); returning best available answer",
+                        )
+                    )
+
+                working_msgs = openai_msgs
+
+            while requested_provider != "openai":
                 yield _sse(
                     _status_payload(
                         "main_stage",
@@ -4589,6 +5425,27 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                     break
                 except Exception as exc:
                     exc_text = str(exc)
+                    if (
+                        requested_provider == "openai"
+                        and use_any_tooling
+                        and not retried_prompt_injection_for_openai
+                        and "tool_call_id" in exc_text
+                    ):
+                        retried_prompt_injection_for_openai = True
+                        use_raw_api = False
+                        llm_cfg["generate_cfg"] = _build_generate_cfg(raw_api_mode=False)
+                        log.warning(
+                            "chat[%s] OpenAI raw tool-call compatibility error; retrying once with prompt-injection mode: %s",
+                            stream_id,
+                            exc_text,
+                        )
+                        yield _sse(_status_payload(
+                            "tool_compat_retry",
+                            "running",
+                            "Retrying tool phase with OpenAI compatibility mode",
+                        ))
+                        agent = _make_agent(include_mcp_tools=include_mcp_for_run, stage="main")
+                        continue
                     if retry_without_mcp_on_eof and not emitted_output and "EOF" in exc_text:
                         retry_without_mcp_on_eof = False
                         include_mcp_for_run = False
@@ -4597,9 +5454,16 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                             stream_id,
                             exc_text,
                         )
-                        agent = _make_agent(include_mcp_tools=False)
+                        agent = _make_agent(include_mcp_tools=False, stage="main")
                         continue
                     raise
+
+            if final_pass_active:
+                yield _sse(_status_payload(
+                    "final_pass",
+                    "done",
+                    "OpenAI final pass complete",
+                ))
 
             # Stream completed successfully
             token_count = estimate_tokens(final_content + all_thinking)

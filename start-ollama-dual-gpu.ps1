@@ -181,7 +181,7 @@ function Get-NvidiaNodeSeeds {
     return @(
         [pscustomobject]@{
             Name          = $poolName
-            Binding       = "CUDA_VISIBLE_DEVICES=$($gpuIndices -join ',')"
+            Binding       = "CUDA_VISIBLE_DEVICES=$($gpuIndices -join ',');HIP_VISIBLE_DEVICES=-1;ROCR_VISIBLE_DEVICES=-1"
             PreferredPort = $CudaPort
         }
     )
@@ -205,7 +205,7 @@ function Get-AmdNodeSeeds {
         $name = $adapter.Name.Trim()
         $seeds += [pscustomobject]@{
             Name          = ConvertTo-NodeSlug -Value $name -Fallback "radeon-$amdIndex"
-            Binding       = "HIP_VISIBLE_DEVICES=$amdIndex"
+            Binding       = "HIP_VISIBLE_DEVICES=$amdIndex;CUDA_VISIBLE_DEVICES=-1"
             PreferredPort = $RadeonPort
         }
         $amdIndex += 1

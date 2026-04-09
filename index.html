@@ -204,6 +204,7 @@
   }
   .setting-group label { font-size: 11px; color: var(--text-dim); margin-bottom: 4px; display: block; }
   .setting-group input,
+  .setting-group select,
   .setting-group textarea {
     width: 100%;
     background: var(--surface2);
@@ -214,6 +215,7 @@
     font-size: 13px;
   }
   .setting-group input:focus,
+  .setting-group select:focus,
   .setting-group textarea:focus { outline: none; border-color: var(--accent); }
   .setting-group input[type="checkbox"] {
     appearance: none;
@@ -1199,7 +1201,31 @@
       <div id="tooling-config-host">
         <div id="tooling-config-panel">
           <div class="setting-group">
-            <label for="model-input">Model</label>
+            <label for="provider-openai-toggle">Model Provider</label>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);">
+              <input id="provider-openai-toggle" type="checkbox" />
+              <span class="tool-line">Use ChatGPT API (OpenAI) instead of local Ollama</span>
+            </label>
+            <div id="provider-status" style="font-size:11px;color:var(--text-dim);margin-top:4px;"></div>
+          </div>
+          <div class="setting-group" id="openai-model-group" style="display:none;">
+            <label for="openai-model-select">ChatGPT Model</label>
+            <select id="openai-model-select">
+              <option value="gpt-5.1">gpt-5.1</option>
+              <option value="gpt-5.2">gpt-5.2</option>
+              <option value="gpt-5.3-codex">gpt-5.3-codex</option>
+              <option value="gpt-5.4">gpt-5.4</option>
+              <option value="gpt-5.4-long-context">gpt-5.4-long-context</option>
+              <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+              <option value="o4-mini">o4-mini</option>
+              <option value="o3">o3</option>
+              <option value="custom">Custom model...</option>
+            </select>
+            <input id="openai-model-custom" type="text" placeholder="Enter custom OpenAI model id" autocomplete="off" spellcheck="false" style="display:none;margin-top:6px;" />
+          </div>
+          <div class="setting-group">
+            <label for="model-input">Local Model (Ollama)</label>
             <input id="model-input" type="text" value="qwen3-coder:30b" autocomplete="off" spellcheck="false" />
           </div>
           <div class="setting-group">
@@ -1271,6 +1297,13 @@
             <button id="brave-save-btn">Save Key</button>
             <div id="brave-status"></div>
           </div>
+          <div class="setting-group">
+            <label>OpenAI API Key</label>
+            <div style="font-size:12px;color:var(--text-dim);line-height:1.5;">
+              Configure <strong>OPENAI_API_KEY</strong> in your <strong>.env</strong> file. The app reads it at startup and does not save it in app settings.
+            </div>
+            <div id="openai-status"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -1336,6 +1369,11 @@
                 <input id="admin-global-mcp-toggle" type="checkbox" checked />
                 <span class="tool-line">Include active MCP server tools</span>
               </label>
+            </div>
+            <div class="setting-group">
+              <label for="admin-global-default-model-input">Default Local Model</label>
+              <input id="admin-global-default-model-input" type="text" placeholder="e.g. qwen3.5:9b-q8_0" autocomplete="off" spellcheck="false" />
+              <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">Used when local chat model is not explicitly set per user.</div>
             </div>
             <div class="setting-group">
               <label for="admin-global-raw-api-toggle">Native Tool-Calling (Raw API)</label>
@@ -1413,6 +1451,11 @@ const emptyEl = document.getElementById('empty-state');
 const userInput = document.getElementById('user-input');
 const sendBtn = document.getElementById('send-btn');
 const stopBtn = document.getElementById('stop-btn');
+const providerOpenAiToggle = document.getElementById('provider-openai-toggle');
+const providerStatusEl = document.getElementById('provider-status');
+const openaiModelGroupEl = document.getElementById('openai-model-group');
+const openaiModelSelect = document.getElementById('openai-model-select');
+const openaiModelCustomInput = document.getElementById('openai-model-custom');
 const modelInput = document.getElementById('model-input');
 const gmlDocsToggle = document.getElementById('gml-docs-toggle');
 const gmlStatusEl = document.getElementById('gml-status');
@@ -1450,6 +1493,7 @@ const adminGlobalFileToggle = document.getElementById('admin-global-file-toggle'
 const adminGlobalCiToggle = document.getElementById('admin-global-ci-toggle');
 const adminGlobalPsExecSelect = document.getElementById('admin-global-ps-exec-select');
 const adminGlobalMcpToggle = document.getElementById('admin-global-mcp-toggle');
+const adminGlobalDefaultModelInput = document.getElementById('admin-global-default-model-input');
 const adminGlobalRawApiToggle = document.getElementById('admin-global-raw-api-toggle');
 const adminGlobalToolsSaveBtn = document.getElementById('admin-global-tools-save-btn');
 const adminReindexCodebaseBtn = document.getElementById('admin-reindex-codebase-btn');
@@ -1470,6 +1514,62 @@ const adminInviteTokenEl = document.getElementById('admin-invite-token');
 const braveKeyInput = document.getElementById('brave-key-input');
 const braveSaveBtn = document.getElementById('brave-save-btn');
 const braveStatusEl = document.getElementById('brave-status');
+const openaiStatusEl = document.getElementById('openai-status');
+
+let hasStoredUserPrefs = false;
+
+function isOpenAiProviderEnabled() {
+  return !!(providerOpenAiToggle && providerOpenAiToggle.checked);
+}
+
+function getSelectedOpenAiModel() {
+  if (!openaiModelSelect) return 'gpt-4.1-mini';
+  if (openaiModelSelect.value === 'custom') {
+    return (openaiModelCustomInput?.value || '').trim() || 'gpt-4.1-mini';
+  }
+  return (openaiModelSelect.value || '').trim() || 'gpt-4.1-mini';
+}
+
+function setOpenAiModelSelection(modelName) {
+  if (!openaiModelSelect) return;
+  const normalized = (modelName || '').trim();
+  const optionExists = Array.from(openaiModelSelect.options || []).some(opt => opt.value === normalized);
+  if (normalized && optionExists) {
+    openaiModelSelect.value = normalized;
+    if (openaiModelCustomInput) openaiModelCustomInput.value = '';
+  } else if (normalized) {
+    openaiModelSelect.value = 'custom';
+    if (openaiModelCustomInput) openaiModelCustomInput.value = normalized;
+  } else {
+    openaiModelSelect.value = 'gpt-4.1-mini';
+    if (openaiModelCustomInput) openaiModelCustomInput.value = '';
+  }
+}
+
+function getActiveModel() {
+  if (isOpenAiProviderEnabled()) {
+    return getSelectedOpenAiModel();
+  }
+  return (modelInput?.value || '').trim() || 'qwen3-coder:30b';
+}
+
+function refreshProviderUi() {
+  const openAiMode = isOpenAiProviderEnabled();
+  if (openaiModelGroupEl) openaiModelGroupEl.style.display = openAiMode ? '' : 'none';
+  if (modelInput) modelInput.disabled = openAiMode;
+  if (openaiModelSelect) openaiModelSelect.disabled = !openAiMode;
+  if (openaiModelCustomInput) {
+    const custom = !!openaiModelSelect && openaiModelSelect.value === 'custom';
+    openaiModelCustomInput.style.display = openAiMode && custom ? '' : 'none';
+    openaiModelCustomInput.disabled = !(openAiMode && custom);
+  }
+  if (providerStatusEl) {
+    providerStatusEl.textContent = openAiMode
+      ? `Chat mode: OpenAI (${getSelectedOpenAiModel()})`
+      : `Chat mode: Local Ollama (${(modelInput?.value || '').trim() || 'qwen3-coder:30b'})`;
+    providerStatusEl.style.color = openAiMode ? 'var(--accent)' : 'var(--text-dim)';
+  }
+}
 
 /* ── Auth helpers ───────────────────────────────────────────────────── */
 function setAuthToken(token) {
@@ -1495,7 +1595,10 @@ function buildUiMirrorState() {
     version: 1,
     user_id: currentUser.id,
     username: currentUser.username,
-    model: (modelInput?.value || '').trim() || 'qwen3-coder:30b',
+    model: getActiveModel(),
+    model_provider: isOpenAiProviderEnabled() ? 'openai' : 'local',
+    local_model: (modelInput?.value || '').trim() || 'qwen3-coder:30b',
+    openai_model: getSelectedOpenAiModel(),
     working_subdir: getWorkingSubdir(),
     toggles: {
       use_gml_docs: !!gmlDocsToggle.checked,
@@ -1549,6 +1652,7 @@ function loadUserToolPreferences() {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return;
+    hasStoredUserPrefs = true;
     const prefs = JSON.parse(raw);
     if (typeof prefs.use_gml_docs === 'boolean') gmlDocsToggle.checked = prefs.use_gml_docs;
     if (typeof prefs.use_ps_docs === 'boolean') psDocsToggle.checked = prefs.use_ps_docs;
@@ -1556,6 +1660,16 @@ function loadUserToolPreferences() {
     if (typeof prefs.use_code_interpreter === 'boolean') codeInterpreterToggle.checked = prefs.use_code_interpreter;
     if (typeof prefs.use_powershell === 'boolean') powershellToggle.checked = prefs.use_powershell;
     if (typeof prefs.use_mcp_tools === 'boolean') mcpToolsToggle.checked = prefs.use_mcp_tools;
+    if (typeof prefs.use_openai_provider === 'boolean' && providerOpenAiToggle) {
+      providerOpenAiToggle.checked = prefs.use_openai_provider;
+    }
+    if (typeof prefs.local_model === 'string' && modelInput) {
+      modelInput.value = prefs.local_model;
+    }
+    if (typeof prefs.openai_model === 'string') {
+      setOpenAiModelSelection(prefs.openai_model);
+    }
+    refreshProviderUi();
   } catch {}
 }
 
@@ -1569,9 +1683,28 @@ function saveUserToolPreferences() {
     use_code_interpreter: codeInterpreterToggle.checked,
     use_powershell: powershellToggle.checked,
     use_mcp_tools: mcpToolsToggle.checked,
+    use_openai_provider: isOpenAiProviderEnabled(),
+    local_model: (modelInput?.value || '').trim(),
+    openai_model: getSelectedOpenAiModel(),
   };
   localStorage.setItem(key, JSON.stringify(prefs));
   broadcastUiMirrorState('toggle-change');
+}
+
+async function persistProviderSettings() {
+  if (!currentUser) return;
+  try {
+    await apiFetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        llm_provider: isOpenAiProviderEnabled() ? 'openai' : 'local',
+        openai_model: getSelectedOpenAiModel(),
+      }),
+    });
+  } catch {
+    // Keep provider selection local even if backend persistence fails.
+  }
 }
 
 function getWorkingSubdirKey() {
@@ -1714,6 +1847,9 @@ async function loadAdminGlobalTooling() {
     adminGlobalCiToggle.checked = !!data.use_code_interpreter;
     adminGlobalPsExecSelect.value = data.use_powershell || 'off';
     adminGlobalMcpToggle.checked = !!data.use_mcp_tools;
+    if (adminGlobalDefaultModelInput) {
+      adminGlobalDefaultModelInput.value = (data.default_model || '').trim();
+    }
     adminGlobalRawApiToggle.checked = true;
     adminGlobalRawApiToggle.disabled = true;
     adminGlobalToolsStatusEl.textContent = 'Global toggles loaded';
@@ -1815,6 +1951,7 @@ async function saveAdminPersonaPrompt() {
 /* ── App bootstrap/auth actions ─────────────────────────────────────── */
 async function applyAuthenticatedState(user) {
   currentUser = user;
+  hasStoredUserPrefs = false;
   ensureUiMirrorChannel();
   const isAdmin = user.role === 'admin';
 
@@ -2345,7 +2482,8 @@ async function handleSend() {
       body: JSON.stringify({
         conversation_id: activeConvId,
         message: text,
-        model: modelInput.value.trim() || 'qwen3-coder:30b',
+        model_provider: isOpenAiProviderEnabled() ? 'openai' : 'local',
+        model: getActiveModel(),
         think: true,
         use_search: true,
         use_gml_docs: gmlDocsToggle.checked,
@@ -2614,6 +2752,25 @@ async function loadBraveStatus() {
       braveStatusEl.style.color = 'var(--text-dim)';
     }
 
+    if (data.openai_api_key_set) {
+      openaiStatusEl.textContent = `Detected from .env (${data.openai_api_key_masked})`;
+      openaiStatusEl.style.color = 'var(--accent)';
+    } else {
+      openaiStatusEl.textContent = 'OPENAI_API_KEY not found in .env (restart server after adding it)';
+      openaiStatusEl.style.color = 'var(--text-dim)';
+    }
+
+    if (!hasStoredUserPrefs && data.llm_provider) {
+      if (providerOpenAiToggle) {
+        providerOpenAiToggle.checked = data.llm_provider.provider === 'openai';
+      }
+      setOpenAiModelSelection(data.llm_provider.openai_model || 'gpt-4.1-mini');
+      if (modelInput && data.default_local_model) {
+        modelInput.value = String(data.default_local_model).trim();
+      }
+      refreshProviderUi();
+    }
+
     if (data.gml_docs_enabled) {
       let gmlStatusText = `Indexed ${data.gml_docs_file_count} files into ${data.gml_docs_chunk_count} retrieval chunks`;
       if (data.gml_embeddings_enabled) {
@@ -2656,6 +2813,8 @@ async function loadBraveStatus() {
   } catch {
     braveStatusEl.textContent = 'Could not load key status';
     braveStatusEl.style.color = 'var(--error)';
+    openaiStatusEl.textContent = 'Could not load OpenAI key status';
+    openaiStatusEl.style.color = 'var(--error)';
     gmlStatusEl.textContent = 'Could not load GML index status';
     gmlStatusEl.style.color = 'var(--error)';
     psStatusEl.textContent = 'Could not load PowerShell docs index status';
@@ -3104,9 +3263,46 @@ adminPersonaSaveBtn.addEventListener('click', saveAdminPersonaPrompt);
   .forEach(el => el.addEventListener('change', saveUserToolPreferences));
 
 if (modelInput) {
-  modelInput.addEventListener('input', () => broadcastUiMirrorState('model-change'));
-  modelInput.addEventListener('change', () => broadcastUiMirrorState('model-change'));
+  modelInput.addEventListener('input', () => {
+    refreshProviderUi();
+    saveUserToolPreferences();
+    broadcastUiMirrorState('model-change');
+  });
+  modelInput.addEventListener('change', () => {
+    refreshProviderUi();
+    saveUserToolPreferences();
+    broadcastUiMirrorState('model-change');
+  });
 }
+
+if (providerOpenAiToggle) {
+  providerOpenAiToggle.addEventListener('change', async () => {
+    refreshProviderUi();
+    saveUserToolPreferences();
+    await persistProviderSettings();
+    broadcastUiMirrorState('provider-change');
+  });
+}
+
+if (openaiModelSelect) {
+  openaiModelSelect.addEventListener('change', async () => {
+    refreshProviderUi();
+    saveUserToolPreferences();
+    await persistProviderSettings();
+    broadcastUiMirrorState('openai-model-change');
+  });
+}
+
+if (openaiModelCustomInput) {
+  openaiModelCustomInput.addEventListener('input', async () => {
+    refreshProviderUi();
+    saveUserToolPreferences();
+    await persistProviderSettings();
+    broadcastUiMirrorState('openai-model-change');
+  });
+}
+
+refreshProviderUi();
 
 if (workingSubdirApplyBtn) {
   workingSubdirApplyBtn.addEventListener('click', async () => {
@@ -3137,7 +3333,7 @@ if (adminGlobalToolsSaveBtn) {
     adminGlobalToolsStatusEl.textContent = 'Saving global toggles...';
     adminGlobalToolsStatusEl.style.color = 'var(--text-dim)';
     try {
-      await apiFetch('/api/admin/global-tooling', {
+      const res = await apiFetch('/api/admin/global-tooling', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3147,9 +3343,16 @@ if (adminGlobalToolsSaveBtn) {
           use_code_interpreter: adminGlobalCiToggle.checked,
           use_powershell: adminGlobalPsExecSelect.value,
           use_mcp_tools: adminGlobalMcpToggle.checked,
+          default_model: (adminGlobalDefaultModelInput?.value || '').trim(),
           use_raw_api: true,
         }),
       });
+      const saved = await res.json();
+      if (modelInput && saved?.default_model) {
+        modelInput.value = String(saved.default_model).trim();
+        saveUserToolPreferences();
+        refreshProviderUi();
+      }
       adminGlobalToolsStatusEl.textContent = 'Global toggles saved';
       adminGlobalToolsStatusEl.style.color = 'var(--accent)';
     } catch (err) {

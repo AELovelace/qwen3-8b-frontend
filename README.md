@@ -7,6 +7,8 @@ A lightweight local chat application with:
 - Ollama chat streaming (SSE)
 - SQLite conversation memory with FTS5 retrieval
 - Optional Brave web search integration
+- Toggle between local Ollama and OpenAI (ChatGPT API) for main chat responses
+- ChatGPT model selector when OpenAI mode is enabled
 - Invite-only authentication with admin-managed users
 
 ## Features
@@ -38,6 +40,7 @@ A lightweight local chat application with:
 - Ollama installed and available in `PATH`
 - A pulled Ollama model compatible with chat
 - Optional: Brave Search API key for live web search
+- Optional: OpenAI API key for ChatGPT mode
 
 Python dependencies are listed in `requirements.txt`.
 
@@ -147,6 +150,10 @@ Notes:
 
 - The frontend model input is sent in each chat request as `model`.
 - Backend default model (if omitted) is `qwen3-coder:30b`.
+- You can switch providers per user between:
+  - `local` (Ollama endpoint)
+  - `openai` (ChatGPT API endpoint)
+- In OpenAI mode, select a model (for example `gpt-4.1-mini`) from the UI.
 
 ### Ollama endpoint
 
@@ -178,6 +185,18 @@ BRAVE_API_KEY=your_key
 ```
 
 2. In-app settings panel (saved to `config.json`).
+
+### OpenAI API key
+
+Configure this via environment variable (recommended in `.env`):
+
+```bash
+OPENAI_API_KEY=your_key
+```
+
+Notes:
+- OpenAI keys are read from environment at startup (`.env` is loaded by the backend).
+- OpenAI keys are not persisted by the app to `config.json`.
 
 The backend resolves keys in this order:
 
@@ -243,6 +262,7 @@ Chat request payload:
 {
   "conversation_id": "uuid",
   "message": "user message",
+  "model_provider": "local",
   "model": "qwen3-coder:30b",
   "think": true,
   "use_search": true,
