@@ -4732,7 +4732,11 @@ async def chat(req: ChatRequest, current_user: dict = Depends(get_current_user))
                 else:
                     helper_targets = helper_targets[:1]
 
-                yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'running', 'message': f'Background helper stage running on {len(helper_targets)} local endpoint(s): {', '.join(helper_targets)}'})}\n\n"
+                background_message = (
+                    f"Background helper stage running on {len(helper_targets)} "
+                    f"local endpoint(s): {', '.join(helper_targets)}"
+                )
+                yield f"data: {json.dumps({'type': 'status', 'key': 'background_stage', 'status': 'running', 'message': background_message})}\n\n"
                 log.info(
                     "chat[%s] triggering background stage: heavy_tooling=%s policy=%s endpoints=%s model=%s",
                     stream_id,
